@@ -5,7 +5,7 @@ CLI interface compatible with modeditor.
 """
 
 from .vcli import main
-from .vutils import ModuleEditor
+from .vedit import vedit
 from .vparser import VeribleParser
 
-__all__ = ["main", "ModuleEditor", "VeribleParser"]
+__all__ = ["main", "vedit", "VeribleParser"]

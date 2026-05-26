@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.join(BASE, "src"))
 os.environ["VERIBLE_BIN"] = r"C:\Users\man\Desktop\code\verible"
 
 from vutils.vparser import VeribleParser
-from vutils.vutils import (
-    ModuleEditor,
+from vutils.vedit import (
+    vedit,
     add_port,
     add_wire,
     add_inst_port,
@@ -198,14 +198,14 @@ for line in src5[mul_start5:mul_end5].splitlines():
 print("--- End ---")
 
 # ============================================================
-#  Test 6: ModuleEditor — combined add_port + add_wire + add_inst_port
+#  Test 6: vedit — combined add_port + add_wire + add_inst_port
 # ============================================================
 print()
 print("=" * 60)
-print("  Test 6: ModuleEditor — combined port + wire + inst-port")
+print("  Test 6: vedit — combined port + wire + inst-port")
 print("=" * 60)
 
-editor = ModuleEditor.from_file(TEST_SV, module_name="top")
+editor = vedit.from_file(TEST_SV, module_name="top")
 editor.add_port({
     "new_sig": {"direction": "input", "type": "wire", "width": "[3:0]", "dimension": ""},
 })

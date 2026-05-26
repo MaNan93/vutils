@@ -10,9 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .vutils import (
+from .vedit import (
     COMMON_TYPES,
-    ModuleEditor,
+    vedit,
     gen_inst,
     looks_like_name,
     looks_like_width_or_dimension,
@@ -20,7 +20,6 @@ from .vutils import (
     normalize_width,
     split_csv,
 )
-from .vparser import VeribleParser
 
 
 # ---------------------------------------------------------------------------
@@ -221,25 +220,24 @@ def print_hierarchy(all_modules: list[dict]) -> None:
 # Edit Dispatcher
 # ---------------------------------------------------------------------------
 
-def apply_edit_actions(source_text: str, args: argparse.Namespace,
-                       vparser: VeribleParser) -> tuple[str, bool]:
+def apply_edit_actions(source_text: str, args: argparse.Namespace) -> tuple[str, bool]:
     """Apply all edit flags to source text. Returns (new_text, changed)."""
     original = source_text
 
     # Determine module name (needed for all edit operations)
     module_name = args.module_name
     if not module_name:
-        mods = vparser.get_modules()
+        mods = vedit.list_modules_in_file(args.sv_file)
         if len(mods) == 1:
-            module_name = mods[0]["name"]
+            module_name = mods[0]
         else:
-            names = ", ".join(m["name"] for m in mods)
+            names = ", ".join(mods)
             raise ValueError(
                 f"file contains multiple modules ({names}); "
                 f"please specify --module"
             )
 
-    ed = ModuleEditor(source_text, module_name)
+    ed = vedit(source_text, module_name)
 
     if args.add_port:
         spec = parse_add_port_spec(args.add_port)
@@ -347,19 +345,32 @@ def main() -> int:
     ))
 
     try:
-        vparser = VeribleParser(str(args.sv_file))
+        source_text = args.sv_file.read_text(encoding="utf-8")
+        module_names = vedit.list_modules_in_file(args.sv_file)
     except Exception as exc:
         print(f"Parse failed: {exc}")
         return ExitCode.ERR_PARSE_FAIL
 
     def get_module_info() -> dict[str, Any]:
-        return vparser.get_module(args.module_name or None)
+        if args.module_name:
+            if args.module_name not in module_names:
+                names = ", ".join(module_names)
+                raise ValueError(f"Module '{args.module_name}' not found. Available: {names}")
+            mod_name = args.module_name
+        else:
+            if len(module_names) != 1:
+                names = ", ".join(module_names)
+                raise ValueError(
+                    f"file contains multiple modules ({names}); "
+                    f"please specify --module"
+                )
+            mod_name = module_names[0]
+
+        return vedit(source_text, mod_name).analyze()
 
     if has_edit_action:
-        # Reuse already-loaded text from VeribleParser to avoid an extra file read.
-        source_text = vparser.source
         try:
-            new_text, changed = apply_edit_actions(source_text, args, vparser)
+            new_text, changed = apply_edit_actions(source_text, args)
         except Exception as exc:
             print(f"Edit failed: {exc}")
             return ExitCode.ERR_EDIT_FAIL
@@ -397,10 +408,10 @@ def main() -> int:
     if args.hierarchy:
         try:
             if args.module_name:
-                module_info = vparser.get_module(args.module_name)
+                module_info = get_module_info()
                 all_mods = [module_info]
             else:
-                all_mods = vparser.get_modules()
+                all_mods = [vedit(source_text, name).analyze() for name in module_names]
         except ValueError as e:
             print(f"Error: {e}")
             return ExitCode.ERR_PARSE_FAIL
