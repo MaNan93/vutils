@@ -108,7 +108,10 @@ def _infer_signal_parts(
 
 
 def parse_add_port_spec(port_csv: str) -> dict[str, str]:
-    """Parse --add-port CSV string into port info dict."""
+    """Parse --add-port CSV string into port info dict.
+    
+    Type is not auto-filled if unspecified; user must provide it explicitly.
+    """
     parts = split_csv(port_csv)
     if len(parts) < 2:
         raise ValueError("--add-port needs at least 'direction, name'")
@@ -116,7 +119,7 @@ def parse_add_port_spec(port_csv: str) -> dict[str, str]:
     if direction not in {"input", "output", "inout", "ref"}:
         raise ValueError("--add-port direction must be input/output/inout/ref")
 
-    info = _infer_signal_parts(parts[1:], default_type="logic")
+    info = _infer_signal_parts(parts[1:], default_type="")
     if not info["name"]:
         raise ValueError("--add-port name is required")
     info["direction"] = direction
@@ -337,7 +340,7 @@ def main() -> int:
     args = parser.parse_args(_preprocess_argv(sys.argv[1:]))
 
     if not args.sv_file.exists():
-        print(f"Error: file not found: {args.sv_file}")
+        print(f"Error: Input file not found: {args.sv_file}")
         return ExitCode.ERR_FILE_NOT_FOUND
 
     has_edit_action = any((
@@ -347,22 +350,30 @@ def main() -> int:
     try:
         source_text = args.sv_file.read_text(encoding="utf-8")
         module_names = vedit.list_modules_in_file(args.sv_file)
+    except UnicodeDecodeError as e:
+        print(f"Error: File encoding issue in {args.sv_file}")
+        print(f"  Details: {e}")
+        return ExitCode.ERR_PARSE_FAIL
     except Exception as exc:
-        print(f"Parse failed: {exc}")
+        print(f"Error: Failed to parse {args.sv_file}")
+        print(f"  Details: {exc}")
         return ExitCode.ERR_PARSE_FAIL
 
     def get_module_info() -> dict[str, Any]:
         if args.module_name:
             if args.module_name not in module_names:
                 names = ", ".join(module_names)
-                raise ValueError(f"Module '{args.module_name}' not found. Available: {names}")
+                raise ValueError(
+                    f"Module '{args.module_name}' not found in {args.sv_file}\n"
+                    f"Available modules: {names}"
+                )
             mod_name = args.module_name
         else:
             if len(module_names) != 1:
                 names = ", ".join(module_names)
                 raise ValueError(
-                    f"file contains multiple modules ({names}); "
-                    f"please specify --module"
+                    f"File {args.sv_file} contains multiple modules: {names}\n"
+                    f"Please specify --module to select one"
                 )
             mod_name = module_names[0]
 
@@ -372,7 +383,8 @@ def main() -> int:
         try:
             new_text, changed = apply_edit_actions(source_text, args)
         except Exception as exc:
-            print(f"Edit failed: {exc}")
+            print(f"Error: Edit operation failed")
+            print(f"  Details: {exc}")
             return ExitCode.ERR_EDIT_FAIL
 
         if args.inplace:
@@ -401,7 +413,8 @@ def main() -> int:
             )
             print(snippet)
         except Exception as exc:
-            print(f"Error generating instantiation: {exc}")
+            print(f"Error: Failed to generate instantiation template")
+            print(f"  Details: {exc}")
             return ExitCode.ERR_GEN_INST_FAIL
         return ExitCode.OK
 
@@ -412,11 +425,9 @@ def main() -> int:
                 all_mods = [module_info]
             else:
                 all_mods = [vedit(source_text, name).analyze() for name in module_names]
-        except ValueError as e:
-            print(f"Error: {e}")
-            return ExitCode.ERR_PARSE_FAIL
         except Exception as exc:
-            print(f"Parse failed: {exc}")
+            print(f"Error: Failed to analyze module hierarchy")
+            print(f"  Details: {exc}")
             return ExitCode.ERR_PARSE_FAIL
         print_hierarchy(all_mods)
         return ExitCode.OK
@@ -428,7 +439,8 @@ def main() -> int:
     try:
         module_info = get_module_info()
     except Exception as exc:
-        print(f"Parse failed: {exc}")
+        print(f"Error: Failed to analyze module")
+        print(f"  Details: {exc}")
         return ExitCode.ERR_PARSE_FAIL
 
     print_port_list(module_info, args.list_port)

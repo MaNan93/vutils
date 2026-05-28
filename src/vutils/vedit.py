@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypedDict, Union
 
 from .vparser import (
     COMMON_TYPES,
+    INVALID_POSITION,
+    INVALID_RANGE,
     PostOrderTreeIterator,
     PreOrderTreeIterator,
     VeribleParser,
@@ -31,6 +33,28 @@ _KEYWORDS = frozenset(
         "localparam",
     }
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Type Definitions
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class LineSpan(TypedDict):
+    """Line span metadata for text editing."""
+    start: int
+    end_no_eol: int
+    end_full: int
+    text: str
+
+
+class SignalSpec(TypedDict, total=False):
+    """Signal specification for parsing and editing."""
+    type: str
+    width: str
+    name: str
+    dimension: str
+    direction: str  # For ports
 
 
 # ---------------------------------------------------------------------------
@@ -135,19 +159,19 @@ def compose_wire_decl(info: dict[str, str]) -> str:
     )
 
 
-def get_line_spans(block_text: str) -> list[dict[str, Any]]:
+def get_line_spans(block_text: str) -> list[LineSpan]:
     """Split text into lines with byte-offset metadata."""
-    spans: list[dict[str, Any]] = []
+    spans: list[LineSpan] = []
     offset = 0
     for line in block_text.splitlines(keepends=True):
         no_eol = line.rstrip("\r\n")
         spans.append(
-            {
-                "start": offset,
-                "end_no_eol": offset + len(no_eol),
-                "end_full": offset + len(line),
-                "text": no_eol,
-            }
+            LineSpan(
+                start=offset,
+                end_no_eol=offset + len(no_eol),
+                end_full=offset + len(line),
+                text=no_eol,
+            )
         )
         offset += len(line)
     return spans
@@ -163,6 +187,22 @@ def apply_text_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
 # ---------------------------------------------------------------------------
 # Internal CST helpers
 # ---------------------------------------------------------------------------
+
+
+def _find_first_identifier_child(node: Any) -> Optional[Any]:
+    """Find first direct child node with identifier tag."""
+    for child in getattr(node, "children", []):
+        if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
+            return child
+    return None
+
+
+def _find_first_identifier_in_subtree(node: Any) -> Optional[Any]:
+    """Find first descendant node with identifier tag."""
+    return node.find(
+        {"tag": ["SymbolIdentifier", "EscapedIdentifier"]},
+        iter_=PreOrderTreeIterator,
+    )
 
 
 def _new_parser() -> VeribleParser:
@@ -361,7 +401,10 @@ def _extract_instances(mod: Any) -> list[dict[str, Any]]:
         itype = inst_base.find({"tag": "kInstantiationType"}, iter_=PreOrderTreeIterator)
         if not itype:
             return ""
-        for sid in itype.find_all({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator):
+        for sid in itype.find_all(
+            {"tag": ["SymbolIdentifier", "EscapedIdentifier", "MacroIdentifier"]},
+            iter_=PreOrderTreeIterator,
+        ):
             t = _desc_text(sid)
             if t and t not in _KEYWORDS and t not in COMMON_TYPES:
                 return t
@@ -369,14 +412,14 @@ def _extract_instances(mod: Any) -> list[dict[str, Any]]:
 
     def _pick_gate_instance_name(ginst: Any, gi_start: int, gi_end: int) -> tuple[str, int]:
         # Prefer direct child identifier, which is the instance name in GateInstance.
-        for child in getattr(ginst, "children", []):
-            if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
-                name = _desc_text(child)
-                if name:
-                    return name, int(child.start) if child.start is not None else gi_start
+        sid = _find_first_identifier_child(ginst)
+        if sid:
+            name = _desc_text(sid)
+            if name:
+                return name, int(sid.start) if sid.start is not None else gi_start
 
         # Fallback: first identifier token in the GateInstance subtree.
-        sid = ginst.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
+        sid = _find_first_identifier_in_subtree(ginst)
         if sid:
             name = _desc_text(sid)
             if name:
@@ -395,7 +438,7 @@ def _extract_instances(mod: Any) -> list[dict[str, Any]]:
 
         for ginst in inst_base.find_all({"tag": "kGateInstance"}, iter_=PreOrderTreeIterator):
             gs, ge = get_node_range(ginst)
-            if gs >= 999999 or ge <= gs:
+            if gs >= INVALID_POSITION or ge <= gs:
                 continue
 
             inst_name, inst_offset = _pick_gate_instance_name(ginst, gs, ge)
@@ -446,7 +489,7 @@ def _module_offsets(mod: Any) -> dict[str, int]:
     if item_list:
         for c in getattr(item_list, "children", []):
             s, _ = get_node_range(c)
-            if s < 999999:
+            if s < INVALID_POSITION:
                 decl_insert_idx = s
                 break
 
@@ -617,7 +660,13 @@ def _validate_edit_or_raise(
     try:
         _parse_tree(edited_source, parser)
     except Exception as exc:
-        raise ValueError(f"{action} produced invalid syntax; change reverted: {exc}")
+        # Provide detailed diagnostic information
+        error_details = str(exc)
+        raise ValueError(
+            f"Edit operation '{action}' produced invalid Verilog syntax.\n"
+            f"Change has been reverted.\n"
+            f"Diagnostic: {error_details}"
+        )
     return edited_source
 
 
@@ -653,14 +702,14 @@ def _nonansi_decl_insert_idx(source: str, mod_node: Any) -> int:
         for idx, c in enumerate(children):
             if getattr(c, "tag", "") != "kModulePortDeclaration":
                 s, _ = get_node_range(c)
-                if s < 999999:
+                if s < INVALID_POSITION:
                     next_non_port_start = s
                 break
             last_port_decl = c
 
         if last_port_decl is not None:
             s, e = get_node_range(last_port_decl)
-            if s < 999999:
+            if s < INVALID_POSITION:
                 search_start = max(0, s - 2)
                 if next_non_port_start > search_start:
                     search_end = next_non_port_start
@@ -730,30 +779,40 @@ def add_port(
     parser: Optional[VeribleParser],
     module_name: str,
     port_spec: dict[str, str],
+    *,
+    mi: Optional[dict] = None,
+    validate: bool = True,
 ) -> str:
     """Add port to module (idempotent).
 
     ANSI: insert full declaration before ')'.
     non-ANSI: insert port name before ')' and declaration in module body.
     """
-    mi = _get_module_info(source, module_name, parser)
+    if mi is None:
+        mi = _get_module_info(source, module_name, parser)
     offsets = _module_offsets(mi["cst"])
     port_insert_idx = offsets["port_insert_idx"]
     if port_insert_idx < 0:
-        raise ValueError("Cannot locate port list close parenthesis")
+        raise ValueError(
+            f"Cannot locate port list close parenthesis in module '{module_name}'.\n"
+            f"Module may not have a port list or may be non-ANSI style."
+        )
     port_insert_idx = _align_to_char(source, port_insert_idx, ")")
     if port_insert_idx < 0:
-        raise ValueError("Unable to align module port insertion point")
+        raise ValueError(
+            f"Unable to align module port insertion point for '{module_name}'.\n"
+            f"Port list close parenthesis location could not be verified."
+        )
 
     if any(p.get("name") == port_spec.get("name") for p in mi.get("ports", [])):
         return source
 
     if mi["is_ansi"]:
         edited = _apply_ansi_add_port(source, port_insert_idx, port_spec)
-        return _validate_edit_or_raise(source, edited, parser, "add_port(ansi)")
+        return _validate_edit_or_raise(source, edited, parser, "add_port(ansi)") if validate else edited
 
     edited = _apply_nonansi_add_port(source, parser, module_name, port_insert_idx, port_spec)
-    return _validate_edit_or_raise(source, edited, parser, "add_port(non-ansi)")
+    return _validate_edit_or_raise(source, edited, parser, "add_port(non-ansi)") if validate else edited
 
 
 def _signal_declared_in_module(mod_node: Any, signal_name: str) -> bool:
@@ -775,35 +834,35 @@ def add_wire(
     parser: Optional[VeribleParser],
     module_name: str,
     wire_spec: dict[str, str],
+    *,
+    mi: Optional[dict] = None,
+    validate: bool = True,
 ) -> str:
     """Add wire/logic declaration before first body item (idempotent)."""
-    mi = _get_module_info(source, module_name, parser)
+    if mi is None:
+        mi = _get_module_info(source, module_name, parser)
     decl_insert_idx = _module_offsets(mi["cst"])["decl_insert_idx"]
     if decl_insert_idx < 0:
         raise ValueError("Cannot locate module body")
 
     name = wire_spec.get("name", "")
     if not name:
-        raise ValueError("wire name is required")
+        raise ValueError("Wire name is required in wire specification")
 
     if _signal_declared_in_module(mi["cst"], name):
         return source
 
     decl = compose_wire_decl(wire_spec) + ";"
     edited = _insert_decl_before_body(source, decl_insert_idx, decl)
-    return _validate_edit_or_raise(source, edited, parser, "add_wire")
+    return _validate_edit_or_raise(source, edited, parser, f"add_wire '{name}'") if validate else edited
 
 
 def _find_gate_instance_node(mod_node: Any, instname: str, offset: Optional[int] = None) -> Optional[Any]:
     candidates: list[Any] = []
     for ginst in mod_node.find_all({"tag": "kGateInstance"}, iter_=PreOrderTreeIterator):
-        sid = None
-        for child in getattr(ginst, "children", []):
-            if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
-                sid = child
-                break
+        sid = _find_first_identifier_child(ginst)
         if sid is None:
-            sid = ginst.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
+            sid = _find_first_identifier_in_subtree(ginst)
         if sid and _desc_text(sid) == instname:
             candidates.append(ginst)
 
@@ -814,23 +873,18 @@ def _find_gate_instance_node(mod_node: Any, instname: str, offset: Optional[int]
 
     def _distance(node: Any) -> int:
         s, _ = get_node_range(node)
-        return abs(s - offset) if s < 999999 else 1_000_000_000
+        return abs(s - offset) if s < INVALID_POSITION else 1_000_000_000
 
     return min(candidates, key=_distance)
 
 
 def _existing_named_port_wire(ginst: Any, port_name: str, source: str) -> Optional[str]:
     for ap in ginst.find_all({"tag": "kActualNamedPort"}, iter_=PreOrderTreeIterator):
-        pname = ""
-        for child in getattr(ap, "children", []):
-            if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
-                pname = _desc_text(child)
-                if pname:
-                    break
-
-        if not pname:
-            sid = ap.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
-            pname = _desc_text(sid) if sid else ""
+        # Find port name from direct child identifier
+        pname_node = _find_first_identifier_child(ap)
+        if pname_node is None:
+            pname_node = _find_first_identifier_in_subtree(ap)
+        pname = _desc_text(pname_node) if pname_node else ""
 
         if pname != port_name:
             continue
@@ -839,7 +893,7 @@ def _existing_named_port_wire(ginst: Any, port_name: str, source: str) -> Option
         if not expr:
             return ""
         es, ee = get_node_range(expr)
-        if es < 999999 and ee > es:
+        if es < INVALID_POSITION and ee > es:
             return source[es:ee].strip()
         return _desc_text(expr)
 
@@ -851,13 +905,17 @@ def add_inst_port(
     parser: Optional[VeribleParser],
     module_name: str,
     spec: dict[str, str],
+    *,
+    mi: Optional[dict] = None,
+    validate: bool = True,
 ) -> str:
     """Add .port(wire) to instance connection list (idempotent)."""
     instname = spec["instname"]
     port_name = spec["port"]
     wire = spec.get("wire", "")
 
-    mi = _get_module_info(source, module_name, parser)
+    if mi is None:
+        mi = _get_module_info(source, module_name, parser)
     inst = next((i for i in mi.get("instances", []) if i.get("name") == instname), None)
     if inst is None:
         raise ValueError(f"Instance '{instname}' not found in module '{module_name}'")
@@ -896,7 +954,7 @@ def add_inst_port(
 
     new_conn = f".{port_name}({wire})" if wire else f".{port_name}()"
     edited = _append_connection_line_before_close(source, close_idx, new_conn)
-    return _validate_edit_or_raise(source, edited, parser, "add_inst_port")
+    return _validate_edit_or_raise(source, edited, parser, "add_inst_port") if validate else edited
 
 
 # ---------------------------------------------------------------------------
@@ -966,12 +1024,24 @@ class vedit:
     def __init__(self, source: str, module_name: str) -> None:
         self._source = source
         self._module_name = module_name
+        self._parser: VeribleParser = _new_parser()   # shared, stateless — reuse across calls
+        self._mi_cache: Optional[dict] = None         # invalidated whenever _source changes
 
-    def _get_parser(self) -> VeribleParser:
-        return _new_parser()
+    # ── Cache management ────────────────────────────────────────────────────
 
-    def _get_module_info(self) -> dict[str, Any]:
-        return _get_module_info(self._source, self._module_name, self._get_parser())
+    def _invalidate(self) -> None:
+        """Drop cached module info after source has been mutated."""
+        self._mi_cache = None
+
+    def _mi(self) -> dict:
+        """Return module info, parsing only when the cache is cold."""
+        if self._mi_cache is None:
+            self._mi_cache = _get_module_info(
+                self._source, self._module_name, self._parser
+            )
+        return self._mi_cache
+
+    # ── Class methods ───────────────────────────────────────────────────────
 
     @classmethod
     def from_file(
@@ -996,14 +1066,27 @@ class vedit:
         source_text = Path(path).read_text(encoding="utf-8")
         return [m["name"] for m in _analyze_modules(source_text, _new_parser())]
 
-    module_text = property(lambda self: self._source)
-    module_name = property(lambda self: self._module_name)
-    ports = property(lambda self: self._get_module_info().get("ports", []))
-    instances = property(lambda self: self._get_module_info().get("instances", []))
-    param_names = property(lambda self: self._get_module_info().get("param_names", []))
-    is_ansi = property(lambda self: self._get_module_info().get("is_ansi", True))
+    # ── Properties (all share the cached parse) ─────────────────────────────
+
+    module_text  = property(lambda self: self._source)
+    module_name  = property(lambda self: self._module_name)
+    ports        = property(lambda self: self._mi().get("ports", []))
+    instances    = property(lambda self: self._mi().get("instances", []))
+    param_names  = property(lambda self: self._mi().get("param_names", []))
+    is_ansi      = property(lambda self: self._mi().get("is_ansi", True))
+
+    # ── Edit methods ────────────────────────────────────────────────────────
 
     def add_port(self, port_dict: dict[str, dict[str, str]]) -> "vedit":
+        """Add one or more ports.
+
+        Parses once up-front; re-parses only when a port was actually inserted
+        (offsets shift).  Final syntax validation is done once at the end.
+        """
+        if not port_dict:
+            return self
+
+        changed = False
         for name, attrs in port_dict.items():
             name = name.strip()
             direction = attrs.get("direction", "").strip().lower()
@@ -1011,49 +1094,90 @@ class vedit:
                 raise ValueError("name is required")
             if direction and direction not in {"input", "output", "inout", "ref"}:
                 raise ValueError("direction must be input/output/inout/ref")
-
             info = {
                 "direction": direction,
-                "type": attrs.get("type", "").strip(),
-                "width": normalize_width(attrs.get("width", "")),
-                "name": name,
+                "type":      attrs.get("type", "").strip(),
+                "width":     normalize_width(attrs.get("width", "")),
+                "name":      name,
                 "dimension": normalize_dimension(attrs.get("dimension", "")),
             }
-            self._source = add_port(self._source, self._get_parser(), self._module_name, info)
+            before = self._source
+            self._source = add_port(
+                self._source, self._parser, self._module_name, info,
+                mi=self._mi(), validate=False,
+            )
+            if self._source != before:
+                # Source changed → offsets are stale; refresh for next iteration.
+                self._invalidate()
+                changed = True
+
+        if changed:
+            _validate_edit_or_raise(self._source, self._source, self._parser, "add_port")
         return self
 
     def add_wire(self, wire_dict: dict[str, dict[str, str]]) -> "vedit":
+        """Add one or more wire/logic declarations.
+
+        Same parse-once strategy as add_port.
+        """
+        if not wire_dict:
+            return self
+
+        changed = False
         for name, attrs in wire_dict.items():
             name = name.strip()
             if not name:
                 raise ValueError("name is required")
             info = {
-                "type": attrs.get("type", "wire").strip() or "wire",
-                "width": normalize_width(attrs.get("width", "")),
-                "name": name,
+                "type":      attrs.get("type", "wire").strip() or "wire",
+                "width":     normalize_width(attrs.get("width", "")),
+                "name":      name,
                 "dimension": normalize_dimension(attrs.get("dimension", "")),
             }
-            self._source = add_wire(self._source, self._get_parser(), self._module_name, info)
+            before = self._source
+            self._source = add_wire(
+                self._source, self._parser, self._module_name, info,
+                mi=self._mi(), validate=False,
+            )
+            if self._source != before:
+                self._invalidate()
+                changed = True
+
+        if changed:
+            _validate_edit_or_raise(self._source, self._source, self._parser, "add_wire")
         return self
 
     def add_inst_port(self, inst_port_dict: dict[str, dict[str, dict[str, str]]]) -> "vedit":
+        """Add .port(wire) connections to instances.
+
+        Same parse-once strategy as add_port.
+        """
+        if not inst_port_dict:
+            return self
+
+        changed = False
         for instname, ports in inst_port_dict.items():
             for port_name, wire_info in ports.items():
+                before = self._source
                 self._source = add_inst_port(
-                    self._source,
-                    self._get_parser(),
-                    self._module_name,
-                    {
-                        "instname": instname,
-                        "port": port_name,
-                        "wire": wire_info.get("wire", ""),
-                    },
+                    self._source, self._parser, self._module_name,
+                    {"instname": instname, "port": port_name,
+                     "wire": wire_info.get("wire", "")},
+                    mi=self._mi(), validate=False,
                 )
+                if self._source != before:
+                    self._invalidate()
+                    changed = True
+
+        if changed:
+            _validate_edit_or_raise(self._source, self._source, self._parser, "add_inst_port")
         return self
 
     def add_inst_ports(self, instname: str, port_wires: dict[str, str]) -> "vedit":
         nested = {instname: {p: {"wire": w} for p, w in port_wires.items()}}
         return self.add_inst_port(nested)
+
+    # ── Analysis ────────────────────────────────────────────────────────────
 
     def gen_inst(
         self,
@@ -1062,19 +1186,19 @@ class vedit:
         port_map: Optional[dict[str, str]] = None,
     ) -> str:
         return gen_inst(
-            self._get_module_info(),
+            self._mi(),
             include_params=include_params,
             instance_name=instance_name,
             port_map=port_map,
         )
 
     def analyze(self) -> dict[str, Any]:
-        mi = self._get_module_info()
+        mi = self._mi()
         result = dict(mi)
         result.setdefault("module_name", result.get("name", ""))
         result["module_text"] = self._source
         return result
 
     def get_hier(self) -> dict[str, Any]:
-        mi = self._get_module_info()
+        mi = self._mi()
         return {"module": mi.get("name", ""), "instances": mi.get("instances", [])}

@@ -16,7 +16,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, TypedDict, Union
 
 
 COMMON_TYPES = frozenset({
@@ -24,6 +24,46 @@ COMMON_TYPES = frozenset({
     "triand", "trior", "trireg", "uwire", "real", "realtime",
     "integer", "time", "signed", "unsigned",
 })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+INVALID_POSITION = 999999
+INVALID_RANGE = (999999, -1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Type Definitions
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class PortInfo(TypedDict, total=False):
+    """Port declaration information."""
+    name: str
+    direction: str
+    type: str
+    width: str
+    dimension: str
+
+
+class InstanceInfo(TypedDict, total=False):
+    """Instance declaration information."""
+    name: str
+    type: str
+    offset: int
+    port_close_idx: int
+
+
+class ModuleInfo(TypedDict, total=False):
+    """Module analysis information."""
+    name: str
+    is_ansi: bool
+    cst: Any
+    ports: list[PortInfo]
+    param_names: list[str]
+    instances: list[InstanceInfo]
 
 
 def _find_verible_binary() -> str:
@@ -455,24 +495,43 @@ class VeribleVerilogSyntax:
             check=False,
         )
 
-        stdout_text = (proc.stdout or b"").decode("utf-8", errors="replace")
-        stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+        # Decode output with proper error handling for diagnostics
+        try:
+            stdout_text = (proc.stdout or b"").decode("utf-8")
+        except UnicodeDecodeError as e:
+            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+            raise ValueError(
+                f"Verible output contains invalid UTF-8 at byte {e.start}: {e.reason}\n"
+                f"stderr: {stderr_text}\n"
+                f"binary: {self.executable}"
+            )
+
+        try:
+            stderr_text = (proc.stderr or b"").decode("utf-8")
+        except UnicodeDecodeError:
+            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
 
         if not stdout_text.strip():
             hint = stderr_text.strip() or "(no stderr)"
             raise ValueError(
-                f"verible produced no output (exit={proc.returncode}): {hint}\n"
-                f"binary used: {self.executable}"
+                f"Verible produced no output (exit code {proc.returncode}).\n"
+                f"stderr: {hint}\n"
+                f"binary: {self.executable}"
             )
 
         try:
             json_data = json.loads(stdout_text)
-        except (ValueError, json.JSONDecodeError):
+        except json.JSONDecodeError as e:
             msg = stderr_text.strip() or stdout_text[:200]
-            raise ValueError(f"verible produced invalid JSON output: {msg}")
+            raise ValueError(
+                f"Verible produced invalid JSON: {e.msg} at line {e.lineno}, column {e.colno}\n"
+                f"diagnostic: {msg}"
+            )
 
         if not isinstance(json_data, dict):
-            raise ValueError("verible produced unexpected JSON structure")
+            raise ValueError(
+                f"Verible produced unexpected JSON structure: expected dict, got {type(json_data).__name__}"
+            )
 
         results: dict[str, SyntaxData] = {}
         for file_key, payload in json_data.items():
@@ -599,7 +658,7 @@ def get_node_range(node: Any) -> tuple[int, int]:
         children.reverse()
         stack.extend(children)
     if not starts:
-        return (999999, -1)
+        return INVALID_RANGE
     return (min(starts), max(ends))
 
 
@@ -616,6 +675,6 @@ def get_text(node: Any, source: str) -> str:
         if text:
             return text
     s, e = get_node_range(node)
-    if s < 999999 and e >= s and e <= len(source):
+    if s < INVALID_POSITION and e >= s and e <= len(source):
         return source[s:e]
     return ""
