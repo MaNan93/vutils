@@ -14,6 +14,7 @@ from .vedit import (
     COMMON_TYPES,
     vedit,
     gen_inst,
+    gen_sig_decl,
     looks_like_name,
     looks_like_width_or_dimension,
     normalize_dimension,
@@ -43,7 +44,7 @@ class ExitCode:
 # ---------------------------------------------------------------------------
 
 def _infer_signal_parts(
-    rest: list[str], *, default_type: str = "wire", has_direction: bool = False
+    rest: list[str], *, default_type: str = "wire"
 ) -> dict[str, str]:
     """Infer type, width, name, dimension from token list after direction removal.
 
@@ -51,7 +52,6 @@ def _infer_signal_parts(
         rest: Remaining tokens after stripping the leading direction (for ports)
               or the raw token list (for wires).
         default_type: Default signal type when none is specified.
-        has_direction: Whether *rest* already had a direction prefix stripped off.
 
     Returns:
         Dict with keys: type, width, name, dimension
@@ -168,16 +168,21 @@ def print_port_list(module_info: dict, direction: str = "all") -> None:
         d = p.get("direction", "").strip().lower()
         if direction != "all" and d != direction:
             continue
-        width = p.get("width", "").strip()
-        signal = f"{p['name']} {width}" if width else p["name"]
-        entries.append((signal, p.get("direction", "")))
+        name    = p.get("name", "").strip()
+        dir_    = p.get("direction", "").strip()
+        ptype   = p.get("type", "").strip()
+        width   = p.get("width", "").strip()
+        type_width = f"{ptype} {width}".strip() if ptype else width
+        entries.append((name, dir_, type_width))
 
     if not entries:
         return
 
-    col_w = max(len(s) for s, _ in entries)
-    for signal, dir_ in entries:
-        print(f"{signal:<{col_w}}, {dir_}")
+    name_w = max(len(e[0]) for e in entries)
+    dir_w  = max(len(e[1]) for e in entries)
+    for name, dir_, type_width in entries:
+        tw_part = f", {type_width}" if type_width else ""
+        print(f"{name:<{name_w}}, {dir_:<{dir_w}}{tw_part}")
 
 
 def print_instance_tree(
@@ -223,33 +228,19 @@ def print_hierarchy(all_modules: list[dict]) -> None:
 # Edit Dispatcher
 # ---------------------------------------------------------------------------
 
-def apply_edit_actions(source_text: str, args: argparse.Namespace) -> tuple[str, bool]:
+def apply_edit_actions(source_text: str, mod_name: str, args: argparse.Namespace) -> tuple[str, bool]:
     """Apply all edit flags to source text. Returns (new_text, changed)."""
     original = source_text
+    ed = vedit(source_text, mod_name)
 
-    # Determine module name (needed for all edit operations)
-    module_name = args.module_name
-    if not module_name:
-        mods = vedit.list_modules_in_file(args.sv_file)
-        if len(mods) == 1:
-            module_name = mods[0]
-        else:
-            names = ", ".join(mods)
-            raise ValueError(
-                f"file contains multiple modules ({names}); "
-                f"please specify --module"
-            )
-
-    ed = vedit(source_text, module_name)
-
-    if args.add_port:
-        spec = parse_add_port_spec(args.add_port)
+    for spec_str in (args.add_port or []):
+        spec = parse_add_port_spec(spec_str)
         ed.add_port({spec["name"]: spec})
-    if args.add_wire:
-        spec = parse_add_wire_spec(args.add_wire)
+    for spec_str in (args.add_wire or []):
+        spec = parse_add_wire_spec(spec_str)
         ed.add_wire({spec["name"]: spec})
-    if args.add_inst_port:
-        spec = parse_add_inst_port_spec(args.add_inst_port)
+    for spec_str in (args.add_inst_port or []):
+        spec = parse_add_inst_port_spec(spec_str)
         ed.add_inst_port({
             spec["instname"]: {
                 spec["port"]: {"wire": spec["wire"]},
@@ -265,28 +256,27 @@ def apply_edit_actions(source_text: str, args: argparse.Namespace) -> tuple[str,
 # ---------------------------------------------------------------------------
 
 
-
-def _preprocess_argv(argv: list[str]) -> list[str]:
-    """Fix argparse nargs='?' issue and add convenience aliases.
-
-    - --list-port <file> → --list-port all <file>  (nargs='?' workaround)
-    - --h → --help  (convenience alias)
-    """
-    _LIST_PORT_CHOICES = {"all", "input", "output", "inout", "ref"}
-    result: list[str] = []
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        # --h → --help
-        if a == "--h":
-            result.append("--help")
-        else:
-            result.append(a)
-        if a == "--list-port":
-            if i + 1 < len(argv) and argv[i + 1] not in _LIST_PORT_CHOICES:
-                result.append("all")
-        i += 1
-    return result
+def _resolve_module_name(
+    module_names: list[str],
+    requested: str | None,
+    sv_file: Path,
+) -> str:
+    """Return the single module name to operate on, or raise ValueError."""
+    if requested:
+        if requested not in module_names:
+            names = ", ".join(module_names)
+            raise ValueError(
+                f"Module '{requested}' not found in {sv_file}\n"
+                f"Available modules: {names}"
+            )
+        return requested
+    if len(module_names) == 1:
+        return module_names[0]
+    names = ", ".join(module_names)
+    raise ValueError(
+        f"File {sv_file} contains multiple modules: {names}\n"
+        f"Please specify --module to select one"
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -297,34 +287,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--list-port",
-        nargs="?",
-        const="all",
         choices=["all", "input", "output", "inout", "ref"],
         dest="list_port",
         metavar="FILTER",
-        help="Filter ports by direction: all, input, output, inout, ref (default: all)",
+        help="List ports filtered by direction: all, input, output, inout, ref",
     )
     parser.add_argument("--hier", "--hierarchy", action="store_true", dest="hierarchy",
                         help="Print module hierarchy")
     parser.add_argument("--module", dest="module_name",
                         help="Specify module name if file contains multiple modules")
-    parser.add_argument("--inst-module", action="store_true", dest="inst_module",
-                        help="Print instantiation template for the module in the file")
+    parser.add_argument("--inst", action="store_true", dest="inst",
+                        help="Print signal declarations + instantiation template")
     parser.add_argument("--inst-name", dest="inst_name",
-                        help="Instance name used with --inst-module")
+                        help="Instance name used with --inst")
     parser.add_argument(
         "--inst-no-param",
         action="store_true",
         dest="inst_no_param",
-        help="With --inst-module, instantiate ports only (skip parameter block)",
+        help="With --inst, skip parameter block",
+    )
+    parser.add_argument(
+        "--inst-no-decl",
+        action="store_true",
+        dest="inst_no_decl",
+        help="With --inst, suppress signal declarations (inst template only)",
     )
 
-    parser.add_argument("--add-port", dest="add_port",
-                        help="Add port: 'direction, type, width, name, dimension'")
-    parser.add_argument("--add-wire", dest="add_wire",
-                        help="Add wire: 'type, width, name, dimension'")
-    parser.add_argument("--add-inst-port", dest="add_inst_port",
-                        help="Add instance port: 'instname, port, wire'")
+    parser.add_argument("--add-port", dest="add_port", action="append", metavar="SPEC",
+                        help="Add port: 'direction, type, width, name, dimension' (repeatable)")
+    parser.add_argument("--add-wire", dest="add_wire", action="append", metavar="SPEC",
+                        help="Add wire: 'type, width, name, dimension' (repeatable)")
+    parser.add_argument("--add-inst-port", dest="add_inst_port", action="append", metavar="SPEC",
+                        help="Add instance port: 'instname, port, wire' (repeatable)")
 
     out_group = parser.add_mutually_exclusive_group()
     out_group.add_argument("--inplace", action="store_true", dest="inplace",
@@ -337,7 +331,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(_preprocess_argv(sys.argv[1:]))
+    args = parser.parse_args()
 
     if not args.sv_file.exists():
         print(f"Error: Input file not found: {args.sv_file}")
@@ -349,7 +343,7 @@ def main() -> int:
 
     try:
         source_text = args.sv_file.read_text(encoding="utf-8")
-        module_names = vedit.list_modules_in_file(args.sv_file)
+        module_names = vedit.list_modules(source_text)
     except UnicodeDecodeError as e:
         print(f"Error: File encoding issue in {args.sv_file}")
         print(f"  Details: {e}")
@@ -359,29 +353,10 @@ def main() -> int:
         print(f"  Details: {exc}")
         return ExitCode.ERR_PARSE_FAIL
 
-    def get_module_info() -> dict[str, Any]:
-        if args.module_name:
-            if args.module_name not in module_names:
-                names = ", ".join(module_names)
-                raise ValueError(
-                    f"Module '{args.module_name}' not found in {args.sv_file}\n"
-                    f"Available modules: {names}"
-                )
-            mod_name = args.module_name
-        else:
-            if len(module_names) != 1:
-                names = ", ".join(module_names)
-                raise ValueError(
-                    f"File {args.sv_file} contains multiple modules: {names}\n"
-                    f"Please specify --module to select one"
-                )
-            mod_name = module_names[0]
-
-        return vedit(source_text, mod_name).analyze()
-
     if has_edit_action:
         try:
-            new_text, changed = apply_edit_actions(source_text, args)
+            mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
+            new_text, changed = apply_edit_actions(source_text, mod_name, args)
         except Exception as exc:
             print(f"Error: Edit operation failed")
             print(f"  Details: {exc}")
@@ -403,15 +378,21 @@ def main() -> int:
             print("No changes needed.")
         return ExitCode.OK
 
-    if args.inst_module:
+    if args.inst:
         try:
-            module_info = get_module_info()
-            snippet = gen_inst(
+            mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
+            module_info = vedit(source_text, mod_name).analyze(include_instances=False)
+            parts: list[str] = []
+            if not args.inst_no_decl:
+                decl = gen_sig_decl(module_info)
+                if decl:
+                    parts.append(decl)
+            parts.append(gen_inst(
                 module_info,
                 include_params=not args.inst_no_param,
                 instance_name=args.inst_name,
-            )
-            print(snippet)
+            ))
+            print("\n\n".join(parts))
         except Exception as exc:
             print(f"Error: Failed to generate instantiation template")
             print(f"  Details: {exc}")
@@ -421,8 +402,8 @@ def main() -> int:
     if args.hierarchy:
         try:
             if args.module_name:
-                module_info = get_module_info()
-                all_mods = [module_info]
+                mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
+                all_mods = [vedit(source_text, mod_name).analyze()]
             else:
                 all_mods = [vedit(source_text, name).analyze() for name in module_names]
         except Exception as exc:
@@ -437,7 +418,8 @@ def main() -> int:
         return ExitCode.OK
 
     try:
-        module_info = get_module_info()
+        mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
+        module_info = vedit(source_text, mod_name).analyze(include_instances=False)
     except Exception as exc:
         print(f"Error: Failed to analyze module")
         print(f"  Details: {exc}")

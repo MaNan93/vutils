@@ -132,31 +132,18 @@ def append_comma_to_port_line(line: str) -> str:
     return code + newline
 
 
+def _compose_decl(info: dict[str, str], fields: tuple[str, ...]) -> str:
+    """Join non-empty signal field values with a single space."""
+    return " ".join(v for f in fields if (v := info.get(f, "").strip()))
+
+
 def compose_port_decl(info: dict[str, str]) -> str:
-    return " ".join(
-        p
-        for p in [
-            info.get("direction", ""),
-            info.get("type", ""),
-            info.get("width", ""),
-            info.get("name", ""),
-            info.get("dimension", ""),
-        ]
-        if p
-    )
+    return _compose_decl(info, ("direction", "type", "width", "name", "dimension"))
 
 
 def compose_wire_decl(info: dict[str, str]) -> str:
-    return " ".join(
-        p
-        for p in [
-            info.get("type", "wire"),
-            info.get("width", ""),
-            info.get("name", ""),
-            info.get("dimension", ""),
-        ]
-        if p
-    )
+    effective = {**info, "type": info.get("type", "wire") or "wire"}
+    return _compose_decl(effective, ("type", "width", "name", "dimension"))
 
 
 def get_line_spans(block_text: str) -> list[LineSpan]:
@@ -280,11 +267,9 @@ def _extract_port_fields_from_decl(pd: Any, source: str) -> dict[str, str]:
     dimension = ""
     name = ""
 
-    for tag in ("input", "output", "inout", "ref"):
-        d = pd.find({"tag": tag}, iter_=PreOrderTreeIterator)
-        if d:
-            direction = tag
-            break
+    d = pd.find({"tag": ["input", "output", "inout", "ref"]}, iter_=PreOrderTreeIterator)
+    if d:
+        direction = getattr(d, "tag", "")
 
     dt = pd.find({"tag": "kDataType"}, iter_=PreOrderTreeIterator)
     if dt:
@@ -298,11 +283,9 @@ def _extract_port_fields_from_decl(pd: Any, source: str) -> dict[str, str]:
         if unpacked:
             dimension = _desc_text(unpacked)
 
-        for tag in COMMON_TYPES:
-            t = dt.find({"tag": tag}, iter_=PreOrderTreeIterator)
-            if t:
-                ptype = tag
-                break
+        t = dt.find({"tag": list(COMMON_TYPES)}, iter_=PreOrderTreeIterator)
+        if t:
+            ptype = getattr(t, "tag", "")
 
     ids = pd.find_all({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
     for i in ids:
@@ -311,11 +294,9 @@ def _extract_port_fields_from_decl(pd: Any, source: str) -> dict[str, str]:
             name = t
 
     if not ptype and direction:
-        for tag in ("wire", "reg", "logic", "bit", "tri"):
-            t = pd.find({"tag": tag}, iter_=PreOrderTreeIterator)
-            if t:
-                ptype = tag
-                break
+        t = pd.find({"tag": ["wire", "reg", "logic", "bit", "tri"]}, iter_=PreOrderTreeIterator)
+        if t:
+            ptype = getattr(t, "tag", "")
 
     return {
         "name": name,
@@ -392,11 +373,6 @@ def _extract_param_names(mod: Any) -> list[str]:
 
 
 def _extract_instances(mod: Any) -> list[dict[str, Any]]:
-    source_bytes = getattr(mod.syntax_data, "source_code", b"") if getattr(mod, "syntax_data", None) else b""
-    source = source_bytes.decode("utf-8", errors="ignore") if source_bytes else ""
-    if not source:
-        return []
-
     def _pick_inst_type(inst_base: Any) -> str:
         itype = inst_base.find({"tag": "kInstantiationType"}, iter_=PreOrderTreeIterator)
         if not itype:
@@ -506,7 +482,12 @@ def _module_offsets(mod: Any) -> dict[str, int]:
     }
 
 
-def _analyze_modules(source: str, parser: Optional[VeribleParser] = None) -> list[dict[str, Any]]:
+def _analyze_modules(
+    source: str,
+    parser: Optional[VeribleParser] = None,
+    *,
+    include_instances: bool = True,
+) -> list[dict[str, Any]]:
     tree = _parse_tree(source, parser)
     out: list[dict[str, Any]] = []
     for mod in _find_module_nodes(tree):
@@ -519,14 +500,20 @@ def _analyze_modules(source: str, parser: Optional[VeribleParser] = None) -> lis
                 "cst": mod,
                 "ports": _extract_ports(mod, source, is_ansi),
                 "param_names": _extract_param_names(mod),
-                "instances": _extract_instances(mod),
+                "instances": _extract_instances(mod) if include_instances else [],
             }
         )
     return out
 
 
-def _get_module_info(source: str, module_name: Optional[str], parser: Optional[VeribleParser] = None) -> dict[str, Any]:
-    mods = _analyze_modules(source, parser)
+def _get_module_info(
+    source: str,
+    module_name: Optional[str],
+    parser: Optional[VeribleParser] = None,
+    *,
+    include_instances: bool = True,
+) -> dict[str, Any]:
+    mods = _analyze_modules(source, parser, include_instances=include_instances)
     if not mods:
         raise ValueError("No module found in source")
     if module_name:
@@ -552,11 +539,18 @@ def _detect_indent_at(source: str, byte_pos: int) -> str:
     if line_text.strip():
         m = re.match(r"^(\s*)", line_text)
         return m.group(1) if m else "    "
-    for prev_line in reversed(source[:line_start].splitlines()):
+    # Walk backward line-by-line (max 50 lines) without building the full line list.
+    pos = line_start - 1
+    lookback = 0
+    while pos > 0 and lookback < 50:
+        prev_end = pos
+        pos = source.rfind("\n", 0, prev_end) + 1
+        prev_line = source[pos:prev_end]
         s = prev_line.strip()
         if s and not s.startswith(("//", "/*", "*")):
             m2 = re.match(r"^(\s*)", prev_line)
             return m2.group(1) if m2 else "    "
+        lookback += 1
     return "    "
 
 
@@ -569,7 +563,8 @@ def _last_content_line_before(text: str, boundary_pos: int) -> Optional[dict[str
     return None
 
 
-def _append_line_before_close(source: str, close_idx: int, new_content: str) -> str:
+def _append_connection_line_before_close(source: str, close_idx: int, new_content: str) -> str:
+    """Insert a line of content before a closing ')'; shared by all insertion helpers."""
     newline = detect_newline(source)
     indent = _detect_indent_at(source, close_idx)
     last = _last_content_line_before(source, close_idx)
@@ -579,53 +574,26 @@ def _append_line_before_close(source: str, close_idx: int, new_content: str) -> 
         updated += indent + new_content + newline
         return source[:abs_start] + updated + source[abs_end:]
     return source[:close_idx] + newline + indent + new_content + newline + source[close_idx:]
-
 
 def _append_port_line_before_close(source: str, close_idx: int, new_content: str) -> str:
     """Insert module port on its own line before ')'."""
     newline = detect_newline(source)
     indent = _detect_indent_at(source, close_idx)
 
-    # Single-line header case: module m(input logic a);
-    # Force a multiline layout for newly inserted ports.
+    # Single-line header: force multiline layout for newly inserted ports.
     open_idx = source.rfind("(", 0, close_idx)
-    if open_idx >= 0:
-        line_start = source.rfind("\n", 0, open_idx) + 1
-        if "\n" not in source[open_idx:close_idx]:
-            j = close_idx - 1
-            while j >= 0 and source[j].isspace():
-                j -= 1
-            out = source
-            if j >= 0 and out[j] not in "(,":
-                out = out[: j + 1] + "," + out[j + 1 :]
-                close_idx += 1
+    if open_idx >= 0 and "\n" not in source[open_idx:close_idx]:
+        j = close_idx - 1
+        while j >= 0 and source[j].isspace():
+            j -= 1
+        out = source
+        if j >= 0 and out[j] not in "(,":
+            out = out[: j + 1] + "," + out[j + 1 :]
+            close_idx += 1
+        insert = newline + indent + new_content + newline
+        return out[:close_idx] + insert + out[close_idx:]
 
-            cont_indent = indent
-            insert = newline + cont_indent + new_content + newline
-            return out[:close_idx] + insert + out[close_idx:]
-
-    last = _last_content_line_before(source, close_idx)
-    if last:
-        abs_start, abs_end = last["start"], last["end_full"]
-        updated = append_comma_to_port_line(source[abs_start:abs_end])
-        updated += indent + new_content + newline
-        return source[:abs_start] + updated + source[abs_end:]
-    return source[:close_idx] + newline + indent + new_content + newline + source[close_idx:]
-
-
-def _append_connection_line_before_close(source: str, close_idx: int, new_content: str) -> str:
-    """Insert instance connection on its own line before ')'."""
-    newline = detect_newline(source)
-    indent = _detect_indent_at(source, close_idx)
-    last = _last_content_line_before(source, close_idx)
-    if last:
-        abs_start, abs_end = last["start"], last["end_full"]
-        updated = append_comma_to_port_line(source[abs_start:abs_end])
-        if not (updated.endswith("\n") or updated.endswith("\r\n")):
-            updated += newline
-        updated += indent + new_content + newline
-        return source[:abs_start] + updated + source[abs_end:]
-    return source[:close_idx] + newline + indent + new_content + newline + source[close_idx:]
+    return _append_connection_line_before_close(source, close_idx, new_content)
 
 
 def _align_to_char(source: str, idx: int, ch: str) -> int:
@@ -664,7 +632,7 @@ def _validate_edit_or_raise(
         error_details = str(exc)
         raise ValueError(
             f"Edit operation '{action}' produced invalid Verilog syntax.\n"
-            f"Change has been reverted.\n"
+            f"Change was not applied.\n"
             f"Diagnostic: {error_details}"
         )
     return edited_source
@@ -710,7 +678,9 @@ def _nonansi_decl_insert_idx(source: str, mod_node: Any) -> int:
         if last_port_decl is not None:
             s, e = get_node_range(last_port_decl)
             if s < INVALID_POSITION:
-                search_start = max(0, s - 2)
+                # Search from the END of the declaration, not before its start.
+                # Using s-2 could match the ';' on the previous line.
+                search_start = e
                 if next_non_port_start > search_start:
                     search_end = next_non_port_start
                 else:
@@ -752,19 +722,44 @@ def _apply_nonansi_add_port(
 
 
 def _find_matching_paren_from(source: str, open_idx: int) -> int:
-    """Find matching ')' from a known opening '(' index in source text."""
+    """Find matching ')' from a known '(' index, skipping string literals and comments."""
     if open_idx < 0 or open_idx >= len(source) or source[open_idx] != "(":
         return -1
     depth = 0
     i = open_idx
+    in_string = False
+    in_block_comment = False
     while i < len(source):
         ch = source[i]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return i
+        if in_block_comment:
+            if ch == "*" and i + 1 < len(source) and source[i + 1] == "/":
+                in_block_comment = False
+                i += 2
+                continue
+        elif in_string:
+            if ch == "\\":
+                i += 2  # skip escaped character
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "/" and i + 1 < len(source):
+            if source[i + 1] == "/":
+                end = source.find("\n", i)
+                i = end + 1 if end >= 0 else len(source)
+                continue
+            elif source[i + 1] == "*":
+                in_block_comment = True
+                i += 2
+                continue
+        if not in_block_comment and not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
         i += 1
     return -1
 
@@ -815,17 +810,19 @@ def add_port(
     return _validate_edit_or_raise(source, edited, parser, "add_port(non-ansi)") if validate else edited
 
 
+_DECL_TAGS = [
+    "kDataDeclaration",
+    "kNetDeclaration",
+    "kVariableDeclarationAssign",
+    "kModulePortDeclaration",
+]
+
+
 def _signal_declared_in_module(mod_node: Any, signal_name: str) -> bool:
-    for tag in (
-        "kDataDeclaration",
-        "kNetDeclaration",
-        "kVariableDeclarationAssign",
-        "kModulePortDeclaration",
-    ):
-        for node in mod_node.find_all({"tag": tag}, iter_=PreOrderTreeIterator):
-            for sid in node.find_all({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator):
-                if _desc_text(sid) == signal_name:
-                    return True
+    for node in mod_node.find_all({"tag": _DECL_TAGS}, iter_=PreOrderTreeIterator):
+        for sid in node.find_all({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator):
+            if _desc_text(sid) == signal_name:
+                return True
     return False
 
 
@@ -962,6 +959,46 @@ def add_inst_port(
 # ---------------------------------------------------------------------------
 
 
+def gen_sig_decl(module_info: dict) -> str:
+    """Generate signal declarations for all ports of a module.
+
+    inout  → wire
+    others → logic
+    One declaration per line; columns aligned; direction comment at end.
+    """
+    ports = module_info.get("ports", [])
+    valid_ports = [p for p in ports if p.get("name", "").strip()]
+    if not valid_ports:
+        return ""
+
+    rows = []
+    for p in valid_ports:
+        direction = p.get("direction", "").strip().lower()
+        sig_type  = "wire" if direction == "inout" else "logic"
+        width     = p.get("width", "").strip()
+        name      = p.get("name", "").strip()
+        dimension = p.get("dimension", "").strip()
+        # unpacked dimension attaches after name: name [dim]
+        name_part = f"{name} {dimension}" if dimension else name
+        rows.append((sig_type, width, name_part, direction))
+
+    max_type  = max(len(r[0]) for r in rows)
+    max_width = max(len(r[1]) for r in rows)
+    max_name  = max(len(r[2]) for r in rows)
+
+    lines = []
+    for sig_type, width, name_part, direction in rows:
+        decl = f"{name_part};"
+        comment = f"// {direction}" if direction else ""
+        if max_width:
+            line = f"{sig_type:<{max_type}} {width:<{max_width}} {decl:<{max_name + 1}} {comment}"
+        else:
+            line = f"{sig_type:<{max_type}} {decl:<{max_name + 1}} {comment}"
+        lines.append(line.rstrip())
+
+    return "\n".join(lines)
+
+
 def gen_inst(
     module_info: dict,
     include_params: bool = True,
@@ -1058,13 +1095,21 @@ class vedit:
             if len(mods) > 1:
                 names = "\n  - ".join(m["name"] for m in mods)
                 raise ValueError(f"multiple modules:\n  - {names}\nSpecify --module")
-            module_name = mods[0]["name"]
+            # Pre-populate MI cache so first _mi() call costs nothing.
+            inst = cls(source, mods[0]["name"])
+            inst._mi_cache = mods[0]
+            return inst
         return cls(source, module_name)
 
     @classmethod
     def list_modules_in_file(cls, path: Union[Path, str]) -> list[str]:
         source_text = Path(path).read_text(encoding="utf-8")
-        return [m["name"] for m in _analyze_modules(source_text, _new_parser())]
+        return [m["name"] for m in _analyze_modules(source_text, _new_parser(), include_instances=False)]
+
+    @classmethod
+    def list_modules(cls, source_text: str) -> list[str]:
+        """List module names from already-loaded source text (no file I/O)."""
+        return [m["name"] for m in _analyze_modules(source_text, _new_parser(), include_instances=False)]
 
     # ── Properties (all share the cached parse) ─────────────────────────────
 
@@ -1078,99 +1123,167 @@ class vedit:
     # ── Edit methods ────────────────────────────────────────────────────────
 
     def add_port(self, port_dict: dict[str, dict[str, str]]) -> "vedit":
-        """Add one or more ports.
+        """Add one or more ports (idempotent).
 
-        Parses once up-front; re-parses only when a port was actually inserted
-        (offsets shift).  Final syntax validation is done once at the end.
+        ANSI: all ports are batched into a single string operation using drift
+        tracking — only one re-parse for final validation.  non-ANSI: re-parses
+        per port because body declaration position depends on the updated CST.
+        Rolls back ``self._source`` on validation failure.
         """
         if not port_dict:
             return self
 
-        changed = False
-        for name, attrs in port_dict.items():
-            name = name.strip()
-            direction = attrs.get("direction", "").strip().lower()
-            if not name:
-                raise ValueError("name is required")
-            if direction and direction not in {"input", "output", "inout", "ref"}:
-                raise ValueError("direction must be input/output/inout/ref")
-            info = {
-                "direction": direction,
-                "type":      attrs.get("type", "").strip(),
-                "width":     normalize_width(attrs.get("width", "")),
-                "name":      name,
-                "dimension": normalize_dimension(attrs.get("dimension", "")),
-            }
-            before = self._source
-            self._source = add_port(
-                self._source, self._parser, self._module_name, info,
-                mi=self._mi(), validate=False,
-            )
-            if self._source != before:
-                # Source changed → offsets are stale; refresh for next iteration.
-                self._invalidate()
-                changed = True
+        original_source = self._source
+        try:
+            mi = self._mi()
+            is_ansi = mi.get("is_ansi", True)
+            changed = False
 
-        if changed:
-            _validate_edit_or_raise(self._source, self._source, self._parser, "add_port")
+            if is_ansi:
+                offsets = _module_offsets(mi["cst"])
+                close_idx = offsets["port_insert_idx"]
+                close_idx = _align_to_char(self._source, close_idx, ")")
+                if close_idx < 0:
+                    raise ValueError(
+                        f"Unable to locate port list close parenthesis in module "
+                        f"'{self._module_name}'"
+                    )
+                # Insert all ports with drift tracking — no re-parse between iterations.
+                for name, attrs in port_dict.items():
+                    name = name.strip()
+                    direction = attrs.get("direction", "").strip().lower()
+                    if not name:
+                        raise ValueError("name is required")
+                    if direction and direction not in {"input", "output", "inout", "ref"}:
+                        raise ValueError("direction must be input/output/inout/ref")
+                    info = {
+                        "direction": direction,
+                        "type":      attrs.get("type", "").strip(),
+                        "width":     normalize_width(attrs.get("width", "")),
+                        "name":      name,
+                        "dimension": normalize_dimension(attrs.get("dimension", "")),
+                    }
+                    if any(p.get("name") == name for p in mi.get("ports", [])):
+                        continue
+                    before_len = len(self._source)
+                    self._source = _apply_ansi_add_port(self._source, close_idx, info)
+                    close_idx += len(self._source) - before_len
+                    changed = True
+            else:
+                # non-ANSI: body declaration position depends on updated CST;
+                # must re-parse per port.
+                for name, attrs in port_dict.items():
+                    name = name.strip()
+                    direction = attrs.get("direction", "").strip().lower()
+                    if not name:
+                        raise ValueError("name is required")
+                    if direction and direction not in {"input", "output", "inout", "ref"}:
+                        raise ValueError("direction must be input/output/inout/ref")
+                    info = {
+                        "direction": direction,
+                        "type":      attrs.get("type", "").strip(),
+                        "width":     normalize_width(attrs.get("width", "")),
+                        "name":      name,
+                        "dimension": normalize_dimension(attrs.get("dimension", "")),
+                    }
+                    before = self._source
+                    self._source = add_port(
+                        self._source, self._parser, self._module_name, info,
+                        mi=self._mi(), validate=False,
+                    )
+                    if self._source != before:
+                        self._invalidate()
+                        changed = True
+
+            if changed:
+                self._invalidate()
+                _validate_edit_or_raise(self._source, self._source, self._parser, "add_port")
+
+        except Exception:
+            self._source = original_source
+            self._mi_cache = None
+            raise
+
         return self
 
     def add_wire(self, wire_dict: dict[str, dict[str, str]]) -> "vedit":
-        """Add one or more wire/logic declarations.
+        """Add one or more wire/logic declarations (idempotent).
 
-        Same parse-once strategy as add_port.
+        All declarations are batch-inserted with drift tracking — no re-parse
+        between iterations.  Rolls back on validation failure.
         """
         if not wire_dict:
             return self
 
-        changed = False
-        for name, attrs in wire_dict.items():
-            name = name.strip()
-            if not name:
-                raise ValueError("name is required")
-            info = {
-                "type":      attrs.get("type", "wire").strip() or "wire",
-                "width":     normalize_width(attrs.get("width", "")),
-                "name":      name,
-                "dimension": normalize_dimension(attrs.get("dimension", "")),
-            }
-            before = self._source
-            self._source = add_wire(
-                self._source, self._parser, self._module_name, info,
-                mi=self._mi(), validate=False,
-            )
-            if self._source != before:
-                self._invalidate()
+        original_source = self._source
+        try:
+            mi = self._mi()
+            decl_insert_idx = _module_offsets(mi["cst"])["decl_insert_idx"]
+            if decl_insert_idx < 0:
+                raise ValueError("Cannot locate module body")
+
+            changed = False
+            for name, attrs in wire_dict.items():
+                name = name.strip()
+                if not name:
+                    raise ValueError("name is required")
+                info = {
+                    "type":      attrs.get("type", "wire").strip() or "wire",
+                    "width":     normalize_width(attrs.get("width", "")),
+                    "name":      name,
+                    "dimension": normalize_dimension(attrs.get("dimension", "")),
+                }
+                if _signal_declared_in_module(mi["cst"], name):
+                    continue
+                decl = compose_wire_decl(info) + ";"
+                before_len = len(self._source)
+                self._source = _insert_decl_before_body(self._source, decl_insert_idx, decl)
+                decl_insert_idx += len(self._source) - before_len
                 changed = True
 
-        if changed:
-            _validate_edit_or_raise(self._source, self._source, self._parser, "add_wire")
+            if changed:
+                self._invalidate()
+                _validate_edit_or_raise(self._source, self._source, self._parser, "add_wire")
+
+        except Exception:
+            self._source = original_source
+            self._mi_cache = None
+            raise
+
         return self
 
     def add_inst_port(self, inst_port_dict: dict[str, dict[str, dict[str, str]]]) -> "vedit":
         """Add .port(wire) connections to instances.
 
-        Same parse-once strategy as add_port.
+        Rolls back ``self._source`` on validation failure.
         """
         if not inst_port_dict:
             return self
 
-        changed = False
-        for instname, ports in inst_port_dict.items():
-            for port_name, wire_info in ports.items():
-                before = self._source
-                self._source = add_inst_port(
-                    self._source, self._parser, self._module_name,
-                    {"instname": instname, "port": port_name,
-                     "wire": wire_info.get("wire", "")},
-                    mi=self._mi(), validate=False,
-                )
-                if self._source != before:
-                    self._invalidate()
-                    changed = True
+        original_source = self._source
+        try:
+            changed = False
+            for instname, ports in inst_port_dict.items():
+                for port_name, wire_info in ports.items():
+                    before = self._source
+                    self._source = add_inst_port(
+                        self._source, self._parser, self._module_name,
+                        {"instname": instname, "port": port_name,
+                         "wire": wire_info.get("wire", "")},
+                        mi=self._mi(), validate=False,
+                    )
+                    if self._source != before:
+                        self._invalidate()
+                        changed = True
 
-        if changed:
-            _validate_edit_or_raise(self._source, self._source, self._parser, "add_inst_port")
+            if changed:
+                _validate_edit_or_raise(self._source, self._source, self._parser, "add_inst_port")
+
+        except Exception:
+            self._source = original_source
+            self._mi_cache = None
+            raise
+
         return self
 
     def add_inst_ports(self, instname: str, port_wires: dict[str, str]) -> "vedit":
@@ -1185,15 +1298,46 @@ class vedit:
         instance_name: Optional[str] = None,
         port_map: Optional[dict[str, str]] = None,
     ) -> str:
+        # If MI cache is warm, use it at zero extra cost.
+        # Otherwise extract only name/ports/param_names — skip _extract_instances,
+        # which is not needed here and can be expensive for large designs.
+        # The lightweight result is NOT stored in _mi_cache so subsequent calls
+        # that do need 'instances' (add_inst_port etc.) still get the full MI.
+        if self._mi_cache is not None:
+            mi = self._mi_cache
+        else:
+            tree = _parse_tree(self._source, self._parser)
+            mod = next(
+                (
+                    m for m in _find_module_nodes(tree)
+                    if _module_name(m, self._source) == self._module_name
+                ),
+                None,
+            )
+            if mod is None:
+                raise ValueError(f"Module '{self._module_name}' not found in source")
+            is_ansi = _is_ansi_module(mod)
+            mi = {
+                "name": self._module_name,
+                "ports": _extract_ports(mod, self._source, is_ansi),
+                "param_names": _extract_param_names(mod),
+            }
         return gen_inst(
-            self._mi(),
+            mi,
             include_params=include_params,
             instance_name=instance_name,
             port_map=port_map,
         )
 
-    def analyze(self) -> dict[str, Any]:
-        mi = self._mi()
+    def analyze(self, include_instances: bool = True) -> dict[str, Any]:
+        if include_instances:
+            mi = self._mi()
+        else:
+            # Lightweight path: skip instance extraction; does NOT populate _mi_cache
+            # so subsequent edit operations still get the full module info.
+            mi = _get_module_info(
+                self._source, self._module_name, self._parser, include_instances=False
+            )
         result = dict(mi)
         result.setdefault("module_name", result.get("name", ""))
         result["module_text"] = self._source
