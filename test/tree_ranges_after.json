@@ -1,0 +1,71 @@
+{
+  "binary": "C:\\Users\\1\\Desktop\\code\\verible\\verible-verilog-syntax.exe",
+  "body_lines": 2500,
+  "instances": 15,
+  "repeats": 5,
+  "source_bytes": 54610,
+  "branch_nodes": 45698,
+  "parse_medians_seconds": {
+    "total_seconds": 0.355812,
+    "process_seconds": 0.204396,
+    "json_decode_seconds": 0.044056,
+    "tree_conversion_seconds": 0.095443
+  },
+  "range_median_seconds": 0.048713,
+  "parse_runs": [
+    {
+      "total_seconds": 0.35559,
+      "process_seconds": 0.20609,
+      "json_decode_seconds": 0.045673,
+      "tree_conversion_seconds": 0.092306
+    },
+    {
+      "total_seconds": 0.35062,
+      "process_seconds": 0.200867,
+      "json_decode_seconds": 0.044056,
+      "tree_conversion_seconds": 0.094388
+    },
+    {
+      "total_seconds": 0.360054,
+      "process_seconds": 0.204396,
+      "json_decode_seconds": 0.043964,
+      "tree_conversion_seconds": 0.099316
+    },
+    {
+      "total_seconds": 0.365459,
+      "process_seconds": 0.209315,
+      "json_decode_seconds": 0.046091,
+      "tree_conversion_seconds": 0.095443
+    },
+    {
+      "total_seconds": 0.355812,
+      "process_seconds": 0.201726,
+      "json_decode_seconds": 0.043937,
+      "tree_conversion_seconds": 0.097525
+    }
+  ],
+  "range_runs": [
+    {
+      "seconds": 0.048713,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.049186,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.048731,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.048047,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.048118,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    }
+  ],
+  "range_queries_exclude_parsing": true,
+  "excludes_startup_and_imports": true
+}

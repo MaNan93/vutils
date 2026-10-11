@@ -1,0 +1,46 @@
+{
+  "binary": "C:\\Users\\1\\Desktop\\code\\verible\\verible-verilog-syntax.exe",
+  "body_lines": 2500,
+  "instances": 15,
+  "repeats": 5,
+  "source_bytes": 54610,
+  "median_seconds": 1.4431,
+  "excludes_startup_and_imports": true,
+  "runs": [
+    {
+      "seconds": 1.4887,
+      "calls": 3,
+      "tree_calls": 3,
+      "stdout_bytes": 52738122,
+      "output_sha256": "db53e8e2e8cd2e5d5677ad2605961db034ffa5fb73f4358ca4e690f8c04fe64a"
+    },
+    {
+      "seconds": 1.3543,
+      "calls": 3,
+      "tree_calls": 3,
+      "stdout_bytes": 52738122,
+      "output_sha256": "db53e8e2e8cd2e5d5677ad2605961db034ffa5fb73f4358ca4e690f8c04fe64a"
+    },
+    {
+      "seconds": 1.4431,
+      "calls": 3,
+      "tree_calls": 3,
+      "stdout_bytes": 52738122,
+      "output_sha256": "db53e8e2e8cd2e5d5677ad2605961db034ffa5fb73f4358ca4e690f8c04fe64a"
+    },
+    {
+      "seconds": 1.556,
+      "calls": 3,
+      "tree_calls": 3,
+      "stdout_bytes": 52738122,
+      "output_sha256": "db53e8e2e8cd2e5d5677ad2605961db034ffa5fb73f4358ca4e690f8c04fe64a"
+    },
+    {
+      "seconds": 1.4014,
+      "calls": 3,
+      "tree_calls": 3,
+      "stdout_bytes": 52738122,
+      "output_sha256": "db53e8e2e8cd2e5d5677ad2605961db034ffa5fb73f4358ca4e690f8c04fe64a"
+    }
+  ]
+}

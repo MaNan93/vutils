@@ -84,6 +84,14 @@ def _find_verible_binary() -> str:
             if candidate.is_file():
                 return str(candidate)
 
+    # A native local executable avoids a PATH .BAT/.CMD shell hop per parse.
+    here = Path(__file__).resolve().parent
+    for _ in range(6):
+        candidate = here / "verible" / (name + ".exe")
+        if candidate.is_file():
+            return str(candidate)
+        here = here.parent
+
     if found := shutil.which(name):
         return found
 
@@ -122,10 +130,8 @@ class _TreeIteratorBase:
     def _children(self, node: Optional["Node"]) -> Iterable["Node"]:
         if node is None:
             return []
-        children = list(getattr(node, "children", []))
-        if self.reverse_children:
-            children.reverse()
-        return children
+        children = getattr(node, "children", ())
+        return reversed(children) if self.reverse_children else children
 
     def _iter_tree(self, node: Optional["Node"]) -> Iterable["Node"]:
         raise NotImplementedError
@@ -135,20 +141,30 @@ class PreOrderTreeIterator(_TreeIteratorBase):
     def _iter_tree(self, node: Optional["Node"]) -> Iterable["Node"]:
         if node is None:
             return
-        if self.filter_(node):
-            yield node
-        for child in self._children(node):
-            yield from self._iter_tree(child)
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if self.filter_(current):
+                yield current
+            children = getattr(current, "children", ())
+            stack.extend(children if self.reverse_children else reversed(children))
 
 
 class PostOrderTreeIterator(_TreeIteratorBase):
     def _iter_tree(self, node: Optional["Node"]) -> Iterable["Node"]:
         if node is None:
             return
-        for child in self._children(node):
-            yield from self._iter_tree(child)
-        if self.filter_(node):
-            yield node
+        stack = [(node, False)]
+        while stack:
+            current, visited = stack.pop()
+            if visited:
+                if self.filter_(current):
+                    yield current
+            else:
+                stack.append((current, True))
+                children = getattr(current, "children", ())
+                stack.extend((child, False) for child in
+                             (children if self.reverse_children else reversed(children)))
 
 
 class LevelOrderTreeIterator(_TreeIteratorBase):
@@ -243,17 +259,34 @@ class BranchNode(Node):
 
     @property
     def start(self) -> Optional[int]:
-        token = self.find(lambda n: isinstance(n, TokenNode), iter_=PostOrderTreeIterator)
+        token = self._boundary_token(reverse=False)
         return token.start if token is not None else None
 
     @property
     def end(self) -> Optional[int]:
-        token = self.find(
-            lambda n: isinstance(n, TokenNode),
-            iter_=PostOrderTreeIterator,
-            reverse_children=True,
-        )
+        token = self._boundary_token(reverse=True)
         return token.end if token is not None else None
+
+    def _boundary_token(self, reverse: bool) -> Optional[TokenNode]:
+        """Find an edge token lazily, without general search/filter machinery.
+
+        Descend in child order and skip empty branches. Iterator stacks avoid
+        recursion and allocating a stack entry for every sibling in wide nodes.
+        Recompute each time because callers can modify the tree's children.
+        """
+        stack = [iter(reversed(self.children) if reverse else self.children)]
+        exhausted = object()
+        while stack:
+            child = next(stack[-1], exhausted)
+            if child is exhausted:
+                stack.pop()
+            elif isinstance(child, TokenNode):
+                return child
+            else:
+                children = getattr(child, "children", ())
+                if children:
+                    stack.append(iter(reversed(children) if reverse else children))
+        return None
 
     def _normalize_filter(
         self,
@@ -264,14 +297,13 @@ class BranchNode(Node):
         if callable(filter_):
             return filter_
 
-        def as_list(value: Union[str, list[str]]) -> list[str]:
-            return value if isinstance(value, list) else [value]
+        missing = object()
+        checks = tuple((attr, tuple(value) if isinstance(value, list) else (value,))
+                       for attr, value in filter_.items())
 
         def _f(node: Node) -> bool:
-            for attr, value in filter_.items():
-                if not hasattr(node, attr):
-                    return False
-                if getattr(node, attr) not in as_list(value):
+            for attr, values in checks:
+                if getattr(node, attr, missing) not in values:
                     return False
             return True
 
@@ -404,7 +436,8 @@ class VeribleVerilogSyntax:
         if not isinstance(tree_json, dict) or "children" not in tree_json:
             return None
 
-        tree = _remove_null_children(tree_json) if skip_null else tree_json
+        # make_node already ignores nulls; a recursive JSON copy is redundant.
+        tree = tree_json
 
         def make_node(node_json: Any, parent: Optional[Node] = None) -> Optional[Node]:
             if node_json is None:
@@ -438,6 +471,37 @@ class VeribleVerilogSyntax:
         return root
 
     @staticmethod
+    def _transform_interface_tree(tree_json: Any, data: SyntaxData, skip_null: bool) -> Optional[RootNode]:
+        """Build a private, incomplete CST for interface extraction only.
+
+        Keep full module headers and non-ANSI body port declarations, together
+        with their ancestor paths. Retaining paths preserves module nesting and
+        declaration order. The original JSON is never modified. Diagnostics
+        still come from Verible's parse of the complete source.
+        """
+        if not isinstance(tree_json, dict) or "children" not in tree_json:
+            return None
+
+        retained_tags = {"kModuleHeader", "kModulePortDeclaration"}
+
+        def retain(node: dict[str, Any]) -> Optional[dict[str, Any]]:
+            if node.get("tag") in retained_tags:
+                return node
+            children = []
+            for child in node.get("children", []):
+                # Ordinary body tokens cannot contain an interface declaration.
+                if isinstance(child, dict) and "children" in child:
+                    kept = retain(child)
+                    if kept is not None:
+                        children.append(kept)
+            if children:
+                return {"tag": node.get("tag", ""), "children": children}
+            return None
+
+        tree = retain(tree_json) or {"tag": tree_json.get("tag", ""), "children": []}
+        return VeribleVerilogSyntax._transform_tree(tree, data, skip_null)
+
+    @staticmethod
     def _transform_tokens(tokens_json: Any, data: SyntaxData) -> list[Token]:
         if not isinstance(tokens_json, list):
             return []
@@ -463,7 +527,9 @@ class VeribleVerilogSyntax:
                     line=int(e.get("line", 0) or 0),
                     column=int(e.get("column", 0) or 0),
                     phase=str(e.get("phase", "") or ""),
-                    message=str(e.get("message", "") or ""),
+                    message=str(e.get("message") or (
+                        f"offending token {e['text']!r}" if "text" in e else ""
+                    )),
                 )
             )
         return out
@@ -545,7 +611,11 @@ class VeribleVerilogSyntax:
                     data.rawtokens = self._transform_tokens(payload.get("rawtokens"), data)
                 data.errors = self._transform_errors(payload.get("errors", []))
             else:
-                data.errors = [ParseError(line=0, column=0, phase="parse", message="null result")]
+                # A successful diagnostics-only file has a null payload even
+                # when a different file in the batch makes the process exit 1.
+                data.errors = [] if payload is None else [
+                    ParseError(line=0, column=0, phase="parse", message="unexpected result")
+                ]
             results[str(file_key)] = data
 
         return results

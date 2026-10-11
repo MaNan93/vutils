@@ -1,0 +1,136 @@
+{
+  "binary": "C:\\Users\\1\\Desktop\\code\\verible\\verible-verilog-syntax.exe",
+  "body_lines": 2500,
+  "instances": 15,
+  "source_bytes": 54610,
+  "nonansi": false,
+  "repeats": 5,
+  "paired_alternating_order": true,
+  "excludes_startup_and_imports": true,
+  "medians": {
+    "full": {
+      "total_seconds": 0.387219,
+      "process_seconds": 0.208659,
+      "json_seconds": 0.046367,
+      "tree_seconds": 0.102185,
+      "native_calls": 1,
+      "json_bytes": 17579374,
+      "python_nodes": 71183
+    },
+    "interface": {
+      "total_seconds": 0.285549,
+      "process_seconds": 0.21051,
+      "json_seconds": 0.045161,
+      "tree_seconds": 0.011049,
+      "native_calls": 1,
+      "json_bytes": 17579374,
+      "python_nodes": 86
+    }
+  },
+  "runs": {
+    "full": [
+      {
+        "total_seconds": 0.3872190000001865,
+        "process_seconds": 0.2086589999998978,
+        "json_seconds": 0.04636739999841666,
+        "tree_seconds": 0.10218510000049719,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 71183,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.3844857000003685,
+        "process_seconds": 0.20574719999785884,
+        "json_seconds": 0.04787940000096569,
+        "tree_seconds": 0.09745910000128788,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 71183,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.4392353000002913,
+        "process_seconds": 0.23863079999864567,
+        "json_seconds": 0.05194599999958882,
+        "tree_seconds": 0.11747610000020359,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 71183,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.40382940000199596,
+        "process_seconds": 0.21290550000048825,
+        "json_seconds": 0.04415099999823724,
+        "tree_seconds": 0.11125220000030822,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 71183,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.3782554999997956,
+        "process_seconds": 0.2062368000006245,
+        "json_seconds": 0.041403299997909926,
+        "tree_seconds": 0.09974820000206819,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 71183,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      }
+    ],
+    "interface": [
+      {
+        "total_seconds": 0.2888902999984566,
+        "process_seconds": 0.20565210000131628,
+        "json_seconds": 0.047938299998349976,
+        "tree_seconds": 0.02036969999971916,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 86,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.2791006999977981,
+        "process_seconds": 0.2105100999979186,
+        "json_seconds": 0.04516119999971124,
+        "tree_seconds": 0.01045710000107647,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 86,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.2953452000001562,
+        "process_seconds": 0.22215940000023693,
+        "json_seconds": 0.04702660000111791,
+        "tree_seconds": 0.012556800000311341,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 86,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.28554910000093514,
+        "process_seconds": 0.21715879999828758,
+        "json_seconds": 0.04342539999925066,
+        "tree_seconds": 0.011049400000047171,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 86,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      },
+      {
+        "total_seconds": 0.2639601999981096,
+        "process_seconds": 0.2000105999977677,
+        "json_seconds": 0.04125380000186851,
+        "tree_seconds": 0.010463499998877523,
+        "native_calls": 1,
+        "json_bytes": 17579374,
+        "python_nodes": 86,
+        "output_sha256": "8a5f419a0162e6e5ef56858206e8a0e643d525f05ac33d9416b24b30c6892994"
+      }
+    ]
+  }
+}

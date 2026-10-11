@@ -1,0 +1,71 @@
+{
+  "binary": "C:\\Users\\1\\Desktop\\code\\verible\\verible-verilog-syntax.exe",
+  "body_lines": 2500,
+  "instances": 15,
+  "repeats": 5,
+  "source_bytes": 54610,
+  "branch_nodes": 45698,
+  "parse_medians_seconds": {
+    "total_seconds": 0.377937,
+    "process_seconds": 0.220757,
+    "json_decode_seconds": 0.043687,
+    "tree_conversion_seconds": 0.095525
+  },
+  "range_median_seconds": 0.293373,
+  "parse_runs": [
+    {
+      "total_seconds": 0.398948,
+      "process_seconds": 0.237355,
+      "json_decode_seconds": 0.045124,
+      "tree_conversion_seconds": 0.095525
+    },
+    {
+      "total_seconds": 0.428963,
+      "process_seconds": 0.230323,
+      "json_decode_seconds": 0.077282,
+      "tree_conversion_seconds": 0.104205
+    },
+    {
+      "total_seconds": 0.375498,
+      "process_seconds": 0.220757,
+      "json_decode_seconds": 0.043687,
+      "tree_conversion_seconds": 0.094578
+    },
+    {
+      "total_seconds": 0.377937,
+      "process_seconds": 0.217735,
+      "json_decode_seconds": 0.043221,
+      "tree_conversion_seconds": 0.100895
+    },
+    {
+      "total_seconds": 0.365704,
+      "process_seconds": 0.214394,
+      "json_decode_seconds": 0.040587,
+      "tree_conversion_seconds": 0.093895
+    }
+  ],
+  "range_runs": [
+    {
+      "seconds": 0.296698,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.291442,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.294887,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.291958,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    },
+    {
+      "seconds": 0.293373,
+      "output_sha256": "b3888d06438ed2b83ac226477a0fdb4cd745f67c22e07923ea517f2ad0c76be6"
+    }
+  ],
+  "range_queries_exclude_parsing": true,
+  "excludes_startup_and_imports": true
+}
