@@ -282,6 +282,14 @@ def _resolve_module_name(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Parse / edit Verilog module ports with verible-verilog-syntax",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Run from the vutils repository (Python 3.12 recommended):\n"
+            "  uv run vutils --help\n"
+            "  uv run vutils examples/test_parser.sv --list-port all\n"
+            "  uv run vutils design.sv --inst --inst-name u_design\n"
+            "Requires verible-verilog-syntax via VERIBLE_BIN, PATH or the nearby misc/verible directory."
+        ),
     )
     parser.add_argument("sv_file", type=Path, help="Path to .v/.sv file")
 
