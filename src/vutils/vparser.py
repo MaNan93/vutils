@@ -71,8 +71,9 @@ def _find_verible_binary() -> str:
 
     Search order:
     1) VERIBLE_BIN (path to file or containing directory)
-    2) PATH
-    3) nearby 'verible' directory (walk up from this file)
+    2) nearby native Windows executable (avoids a PATH shell wrapper)
+    3) PATH
+    4) nearby 'verible' or 'misc/verible' directory
     """
     name = "verible-verilog-syntax"
     if env := os.environ.get("VERIBLE_BIN", ""):
@@ -87,9 +88,10 @@ def _find_verible_binary() -> str:
     # A native local executable avoids a PATH .BAT/.CMD shell hop per parse.
     here = Path(__file__).resolve().parent
     for _ in range(6):
-        candidate = here / "verible" / (name + ".exe")
-        if candidate.is_file():
-            return str(candidate)
+        for directory in (here / "verible", here / "misc" / "verible"):
+            candidate = directory / (name + ".exe")
+            if candidate.is_file():
+                return str(candidate)
         here = here.parent
 
     if found := shutil.which(name):
@@ -97,10 +99,11 @@ def _find_verible_binary() -> str:
 
     here = Path(__file__).resolve().parent
     for _ in range(6):
-        for ext in ("", ".exe"):
-            candidate = here / "verible" / (name + ext)
-            if candidate.is_file():
-                return str(candidate)
+        for directory in (here / "verible", here / "misc" / "verible"):
+            for ext in ("", ".exe"):
+                candidate = directory / (name + ext)
+                if candidate.is_file():
+                    return str(candidate)
         here = here.parent
 
     return name
