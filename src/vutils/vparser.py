@@ -441,10 +441,60 @@ def _original_offset(data, position):
     return position - bisect_left(data.inserted_bytes, position)
 
 
+def _insert_view_bytes(source, additions):
+    """Apply parser-only insertions and track every synthetic byte."""
+    parts, inserted, cursor, growth = [], [], 0, 0
+    for offset, text in sorted(additions, key=lambda item: item[0]):
+        parts.extend((source[cursor:offset], text))
+        inserted.extend(range(offset + growth, offset + growth + len(text)))
+        growth += len(text)
+        cursor = offset
+    parts.append(source[cursor:])
+    return b"".join(parts), tuple(inserted)
+
+
+def _recover_view(tree, source, base, view, inserted):
+    """Disambiguate recovery nodes without discarding source expressions.
+
+    Parentheses around a bit-select's index do not change its meaning. A macro
+    occupying an entire packed range is opaque: :0 is only a grammar sentinel,
+    never an inferred macro value. The original range remains in all metadata.
+    Ordinary single-bound packed dimensions still fail validation.
+    """
+    additions = [(pos - idx, view[pos:pos + 1]) for idx, pos in enumerate(inserted)]
+    changed = False
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if not node.has_error:
+            continue
+        start = node.start_byte - bisect_left(inserted, node.start_byte)
+        end = node.end_byte - bisect_left(inserted, node.end_byte)
+        original = source[start:end]
+        if node.type == "packed_dimension" and re.fullmatch(
+            rb"\[\s*`[A-Za-z_][A-Za-z0-9_$]*\s*\]", original
+        ):
+            additions.append((end - 1, b":0"))
+            changed = True
+            continue
+        if node.is_error and original.startswith(b"[") and original.endswith(b"]"):
+            additions.extend(((start + 1, b"("), (end - 1, b")")))
+            changed = True
+        stack.extend(reversed(node.children))
+    if not changed:
+        return tree, inserted
+    adapted, mapping = _insert_view_bytes(base, additions)
+    return Parser(_LANGUAGE).parse(adapted), mapping
+
+
 def _parse_source(source: bytes):
     """One in-process native parse (also the instrumentation point for tests)."""
-    view, inserted = _parenthesize_system_casts(_parsing_view(source))
-    return Parser(_LANGUAGE).parse(view), inserted
+    base = _parsing_view(source)
+    view, inserted = _parenthesize_system_casts(base)
+    tree = Parser(_LANGUAGE).parse(view)
+    if tree.root_node.has_error:
+        return _recover_view(tree, source, base, view, inserted)
+    return tree, inserted
 
 
 class SyntaxNode(BranchNode):

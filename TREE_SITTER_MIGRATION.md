@@ -3,7 +3,9 @@
 日期：2026-11-08。
 
 默认解析后端已替换为进程内 Tree-sitter，不再查找或启动 Verible。
-依赖：`tree-sitter==0.25.2`、`tree-sitter-systemverilog==0.4.1`，由 `uv.lock` 锁定。
+依赖：`tree-sitter==0.25.2`，语法库固定到上游修复提交
+`08c5e379b9b6022d4c433a9249e6d54dedd051ba`（包版本仍为 0.4.1），由 `uv.lock` 锁定。
+首次源码安装需要 C 编译器；当前平台的离线 wheel 已生成到 `artifacts/wheels/`。
 Python 最低版本调整为 3.10，仓库默认仍为 3.12。
 
 ## 实现
@@ -26,11 +28,11 @@ uv run python -m unittest discover -s test
 uv run python examples/check_src.py ../src --output artifacts/tree-sitter-review.json
 ```
 
-- 86 项测试全部通过，包括 CLI、批量编辑、幂等性、冲突回滚、缓存、宏、interface、generate 路径、实例数组及 Unicode/CRLF。
-- `code/src` 共 808 个 `.sv`：802 个完成检查，6 个在原始源码解析阶段失败。
-  802 个中有 2 个不含模块，仅检查语法；其余累计 800 个模块、30,707 个端口、2,710 个实例。
+- 100 项测试全部通过，包括 CLI、批量编辑、幂等性、冲突回滚、缓存、宏、interface、generate 路径、实例数组及 Unicode/CRLF。
+- `code/src` 共 808 个 `.sv`：全部完成检查，其中 2 个不含模块，仅检查语法。
+  迁移初版失败的 6 个文件已全部支持；具体统计见 JSON。
 - 每个已解析模块检查生成模板语法、添加端口和 wire、重复添加；存在实例时，按作用域路径给首个实例添加连接并检查重复执行。
-- 最终全目录检查耗时约 89 秒，无模板或编辑阶段失败。
+- 最终全目录检查耗时约 91 秒，无模板或编辑阶段失败。
 - 与旧检查可比较的文件中，端口计数差异是此前未提取的条件编译端口；新统计也包含源文件中条件分支里的实例。它们不是某个配置 elaboration 后的数量。
 - 缓存基准在 2,500 行声明、15 个实例的合成输入上连续读取模板和元数据，三次运行均只解析一次。
 
@@ -38,20 +40,30 @@ uv run python examples/check_src.py ../src --output artifacts/tree-sitter-review
 示例输出：`artifacts/xtlh_tlp_len_calc.inst.sv`、`artifacts/xtlh_ms.edited.sv`、
 `artifacts/phy_if_cpcie_shadow.edited.sv`。这些是本地验证产物，未提交到版本控制。
 
-## 尚未支持的输入
+## 已解决的六个兼容性问题
 
-以下 6 个文件被当前语法库/内部解析视图拒绝，失败发生在编辑之前。
-这不表示原始 RTL 非法，也未对它们进行自动修改：
+所有最小复现均为合成语法示例，位于 `examples/parser_repros/`，并纳入自动测试。
 
-- `Adm_ms/atu_out_match.sv`
-- `Adm_ms/atu_out_translate.sv`
-- `Adm_ms/radm_anti_addr_ctrl.sv`
-- `Adm_ms/target_cpl_lut_ms.sv`
-- `Adm_ms/xadm_fc_dllp_proc_ms.sv`
-- `Edmapf/DWC_pcie_edmapf_ctrl_nullFilter.sv`
+| 原始失败文件 | 最小复现 | 原因与处理 |
+| --- | --- | --- |
+| `Adm_ms/atu_out_match.sv` | `01_binary_hierarchy.sv` | 复杂层级引用/二元表达式歧义；固定上游修复版本 |
+| `Adm_ms/atu_out_translate.sv` | `02_conditional_concat.sv` | 拼接内的条件表达式歧义；固定上游修复版本 |
+| `Adm_ms/radm_anti_addr_ctrl.sv` | `03_parenthesized_concat.sv` | 带括号的多成员拼接歧义；固定上游修复版本 |
+| `Adm_ms/target_cpl_lut_ms.sv` | `04_opaque_packed_range.sv` | packed range 中的宏；保留原文的不透明范围适配 |
+| `Adm_ms/xadm_fc_dllp_proc_ms.sv` | `05_selected_concat_compare.sv` | 多重选择/拼接/比较表达式歧义；固定上游修复版本 |
+| `Edmapf/DWC_pcie_edmapf_ctrl_nullFilter.sv` | `06_nested_index.sv` | 多层成员选择作为索引的歧义；内部索引加括号并映射回原文 |
 
-涉及复杂表达式以及宏展开后才能确定的语法，例如 packed range 中的单独宏。
-具体诊断见 JSON 的 `stage`/`error`。
+宏范围适配仅在 packed dimension 的错误节点上识别单独的宏引用，给内部视图添加语法占位，
+不会将普通非法的 `[WIDTH]` packed range 当作宏接受，也不把占位值当作宏展开结果。
+嵌套索引适配不移除表达式；仍不合法的输入保留错误并拒绝编辑。
+
+## 格式、预览与全局安装
+
+- 新增端口继承相邻字段列和缩进；分隔符按最近的顶层逗号选择行尾、行首或独立行风格，忽略嵌套调用中的逗号。
+- `--diff` 预览 unified diff，`--check` 在需要修改时返回 1、无变化时返回 0，均不写文件；可以组合。
+- CLI 通过 `vedit.from_source_all` 复用首次解析。测试确认多模块 hierarchy 也只解析一次，单次编辑只有初始解析和结果校验。
+- 已用可编辑工具安装到 `~/.local/bin/vutils`；在 home 和 `/tmp` 验证 `uv run vutils`。
+- 全局安装、离线 wheel 和检查返回码的使用方法见 [README](README.md)。
 
 Tree-sitter 校验仅覆盖内部视图的语法；工具不展开 include、不选择条件编译活跃分支，
 不进行类型检查或完整 elaboration。生成模板的包、参数、宏及 interface 时钟连接等仍由使用方提供。

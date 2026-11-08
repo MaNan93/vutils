@@ -48,18 +48,12 @@ wheels = [
 [[package]]
 name = "tree-sitter-systemverilog"
 version = "0.4.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4c/88/3897df72c9d2789c8067c2a821f23c892ec3592419d223b5a8a976f888e6/tree_sitter_systemverilog-0.4.1.tar.gz", hash = "sha256:79d883717af352391f9893a2b113f3d466020243b611e25b02c08caece2e556b", size = 2760871, upload-time = "2026-09-15T12:08:30.742Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c6/09/fa18869748bff1f5207d5d22a71f5b2539f8ff6353b5de743f25df3f1bae/tree_sitter_systemverilog-0.4.1-cp310-abi3-macosx_10_9_x86_64.whl", hash = "sha256:63381ce0e79eb23081f7d98c0792cf2203869457770e70825177297bc9b8c990", size = 875233, upload-time = "2026-09-15T12:08:19.846Z" },
-    { url = "https://files.pythonhosted.org/packages/b4/8a/d4623c73b42fc6751b210613eed45bfdad07e7d34b8acc5e62997466e873/tree_sitter_systemverilog-0.4.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:e856bba128ff5c91bb95f304e715f23305ec214ba6d6cdcf47810140cf61f4d2", size = 1059808, upload-time = "2026-09-15T12:08:21.274Z" },
-    { url = "https://files.pythonhosted.org/packages/a1/02/5a73e4ff68fbf7b820737b46a4e6a0863c9b54232818f79e6f5fb6ed20c8/tree_sitter_systemverilog-0.4.1-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:e51303bfd94d21755ecea0a07a338480bb45c0e2414efa6d423cde2b4d587bd0", size = 907529, upload-time = "2026-09-15T12:08:22.766Z" },
-    { url = "https://files.pythonhosted.org/packages/2b/ff/6da7bccf5b7919abb9deb5eabfb0ad62ad978268d7d3c3624baa3ce4e8ed/tree_sitter_systemverilog-0.4.1-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:77368292910370bf576f4aa59c09c713286314575720938bfe6b8d1816f7b515", size = 905208, upload-time = "2026-09-15T12:08:24Z" },
-    { url = "https://files.pythonhosted.org/packages/58/5a/f303ac720d6848670ea7f648c68ebe708fe7c0b52d8d2864854f73473fa6/tree_sitter_systemverilog-0.4.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:efeb9b620daf43384dcee723655be9e61e1f74fbc3152c7c5226c63e59947b9b", size = 904558, upload-time = "2026-09-15T12:08:25.361Z" },
-    { url = "https://files.pythonhosted.org/packages/80/41/5d62293faafefd9a166cc256fe68132e67ca7236670af77a47ef2018efe9/tree_sitter_systemverilog-0.4.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:503c9bf7be314be2cccb4ee8eccddbd08bd1ffe0d89f69fead2c875b90147c9f", size = 906957, upload-time = "2026-09-15T12:08:26.568Z" },
-    { url = "https://files.pythonhosted.org/packages/83/c5/b891b0b955da042b59976a37806e407e0005626f0e492afd65a4ca366a91/tree_sitter_systemverilog-0.4.1-cp310-abi3-win_amd64.whl", hash = "sha256:ed3af21d1c9265d3e9dc16bef66b97b5ef22e9c5bc6b6a03ec4417b451b2fec2", size = 880453, upload-time = "2026-09-15T12:08:27.869Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/49/4eda01ab7c99dbc063d2ec6da6904f57f8e4caeff241278db0644e1ada33/tree_sitter_systemverilog-0.4.1-cp310-abi3-win_arm64.whl", hash = "sha256:f15a39c455ad08a3affb4e6b5ef4079188ef147c5279b1c4d330025231ab25db", size = 879256, upload-time = "2026-09-15T12:08:29.469Z" },
-]
+source = { url = "https://github.com/gmlarumbe/tree-sitter-systemverilog/archive/08c5e379b9b6022d4c433a9249e6d54dedd051ba.tar.gz" }
+sdist = { hash = "sha256:af04e69e9c95bd235d4376636297ef6ec4d646243c2f2402d1e71fea6f24f1a0" }
+
+[package.metadata]
+requires-dist = [{ name = "tree-sitter", marker = "extra == 'core'", specifier = "~=0.24" }]
+provides-extras = ["core"]
 
 [[package]]
 name = "vutils"
@@ -73,5 +67,5 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "tree-sitter", specifier = ">=0.25,<0.26" },
-    { name = "tree-sitter-systemverilog", specifier = ">=0.4.1,<0.5" },
+    { name = "tree-sitter-systemverilog", url = "https://github.com/gmlarumbe/tree-sitter-systemverilog/archive/08c5e379b9b6022d4c433a9249e6d54dedd051ba.tar.gz" },
 ]

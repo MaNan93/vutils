@@ -10,6 +10,7 @@ from .vparser import (
     COMMON_TYPES,
     PreOrderTreeIterator,
     TreeSitterParser,
+    TokenNode,
     module_nodes,
 )
 
@@ -513,10 +514,7 @@ def _last_content_line_before(text: str, boundary_pos: int) -> Optional[dict[str
     return None
 
 
-def _append_connection_line_before_close(source: str, close_idx: int, new_content: str) -> str:
-    """Insert outside comments, locating the last token of this exact list."""
-    newline = detect_newline(source)
-    indent = _detect_indent_at(source, close_idx)
+def _list_context(source, close_idx):
     openings = []
     for token in _PAREN_PATTERN.finditer(source, 0, close_idx):
         if token.group() == "(":
@@ -525,30 +523,131 @@ def _append_connection_line_before_close(source: str, close_idx: int, new_conten
             openings.pop()
     if not openings:
         raise ValueError("Cannot locate connection list opening parenthesis")
-    last = None
-    conditional = False
+    last, commas, depth, conditional = None, [], 0, False
     for token in _LIST_TOKEN_PATTERN.finditer(source, openings[-1] + 1, close_idx):
-        if token.group().startswith("`") and len(token.group()) > 1:
+        text = token.group()
+        if text.startswith("`") and len(text) > 1:
             conditional = True
             continue
-        if not token.group().startswith(("//", "/*")):
-            last = token
+        if text.startswith(("//", "/*")):
+            continue
+        if text == "," and depth == 0:
+            commas.append(token)
+        if text in ("(", "[", "{"):
+            depth += 1
+        elif text in (")", "]", "}"):
+            depth -= 1
+        last = token
+    return last, commas, conditional
+
+
+def _append_connection_line_before_close(source: str, close_idx: int, new_content: str,
+                                         *, indent=None) -> str:
+    """Append using the nearest top-level comma's style, preserving comments."""
+    newline = detect_newline(source)
+    indent = _detect_indent_at(source, close_idx) if indent is None else indent
+    last, commas, conditional = _list_context(source, close_idx)
+    separator, comma_indent, leading_prefix = "trailing", indent, ", "
+    if commas:
+        comma = commas[-1]
+        begin = source.rfind("\n", 0, comma.start()) + 1
+        end = source.find("\n", comma.end())
+        end = len(source) if end < 0 else end
+        before, after = source[begin:comma.start()], source[comma.end():end]
+        after = re.sub(r"/\*.*?\*/|//.*", "", after).strip()
+        if not before.strip():
+            separator = "leading" if after else "standalone"
+            comma_indent = before
+            leading_prefix = "," + re.match(r"[ \t]*", source[comma.end():end]).group()
+    prefix = ""
     if last is not None and last.group() != ",":
-        if conditional:
-            # Keep the separator outside every branch and off directive lines.
-            new_content = ", " + new_content
+        if separator == "standalone":
+            prefix = comma_indent + "," + newline
+        elif separator == "leading" or conditional:
+            # The separator must stay outside conditional branches.
+            new_content = (leading_prefix if separator == "leading" else ", ") + new_content
         else:
             source = source[:last.end()] + "," + source[last.end():]
             close_idx += 1
+    block = prefix + indent + new_content + newline
     line_start = source.rfind("\n", 0, close_idx) + 1
     if not source[line_start:close_idx].strip():
-        return source[:line_start] + indent + new_content + newline + source[line_start:]
-    return (source[:close_idx] + newline + indent + new_content + newline
-            + source[close_idx:])
+        return source[:line_start] + block + source[line_start:]
+    return source[:close_idx] + newline + block + source[close_idx:]
+
 
 def _append_port_line_before_close(source: str, close_idx: int, new_content: str) -> str:
-    """Insert module port on its own line before ')'."""
     return _append_connection_line_before_close(source, close_idx, new_content)
+
+
+def _port_style(source, mod):
+    """Read alignment from complete, single-line adjacent port declarations."""
+    if _is_ansi_module(mod):
+        plist = _header_port_decl_list(_header(mod))
+        declarations = [c for c in plist.children if c.tag == "ansi_port_declaration"]
+    else:
+        declarations = list(_module_nodes(mod, {"port_declaration"}))
+    rows = []
+    for decl in declarations:
+        name = _field(decl, "port_name")
+        if name is None:
+            identifiers = decl.find({"tag": ["list_of_port_identifiers", "list_of_variable_identifiers",
+                                              "list_of_variable_port_identifiers"]})
+            name = _find_first_identifier_child(identifiers)
+        if name is None:
+            continue
+        direction = decl.find({"tag": ["input", "output", "inout", "ref"]}, iter_=PreOrderTreeIterator)
+        if direction is None:
+            continue
+        name_idx, dir_idx = (_byte_to_char_index(source, n.start) for n in (name, direction))
+        line_start = source.rfind("\n", 0, dir_idx) + 1
+        if "\n" in source[dir_idx:name_idx]:
+            continue
+        prefix = source[line_start:dir_idx]
+        indent = prefix
+        if prefix.strip():
+            leading = re.fullmatch(r"([ \t]*),[ \t]*", prefix)
+            if not leading:
+                continue
+            indent = leading.group(1)
+        row = {"indent": indent, "direction": len(prefix.expandtabs()),
+               "name": len(source[line_start:name_idx].expandtabs())}
+        typ, _ = _declaration_type(decl, name)
+        tokens = [n for n in PreOrderTreeIterator(decl) if isinstance(n, TokenNode)
+                  and n.start >= direction.end and n.start < name.start
+                  and n.tag not in {"one_line_comment", "block_comment"}]
+        if typ and tokens:
+            idx = _byte_to_char_index(source, tokens[0].start)
+            row["type"] = len(source[line_start:idx].expandtabs())
+        dt = decl.find({"tag": ["data_type", "implicit_data_type"]}, iter_=PreOrderTreeIterator)
+        packed = _direct(dt, {"packed_dimension"})
+        if packed:
+            idx = _byte_to_char_index(source, packed.start)
+            row["width"] = len(source[line_start:idx].expandtabs())
+        rows.append(row)
+    if not rows:
+        return None
+    style = dict(rows[-1])
+    for field in ("type", "width"):
+        if field not in style:
+            previous = next((r for r in reversed(rows) if field in r), None)
+            if previous:
+                style[field] = previous[field]
+    return style
+
+
+def _format_port_decl(info, style):
+    if not style:
+        return compose_port_decl(info)
+    rendered = ""
+    base = style["direction"]
+    for field in ("direction", "type", "width", "name", "dimension"):
+        value = info.get(field, "").strip()
+        if not value:
+            continue
+        target = style.get(field, base + len(rendered) + bool(rendered)) - base
+        rendered = rendered.ljust(max(target, len(rendered) + bool(rendered))) + value
+    return rendered
 
 
 def _align_to_char(source: str, idx: int, ch: str) -> int:
@@ -604,10 +703,12 @@ def _insert_decl_before_body(source: str, decl_insert_idx: int, decl_text: str) 
     newline = detect_newline(source)
     body_indent = _detect_indent_at(source, decl_insert_idx)
     line_start = source.rfind("\n", 0, decl_insert_idx) + 1
+    if source[line_start:decl_insert_idx] and not source[line_start:decl_insert_idx].strip():
+        body_indent = source[line_start:decl_insert_idx]
     if source[line_start:decl_insert_idx].strip():
-        insert_text = newline + body_indent + decl_text + newline
+        insert_text = newline + body_indent + decl_text.replace(newline, newline + body_indent) + newline
         return source[:decl_insert_idx] + insert_text + source[decl_insert_idx:]
-    insert_text = body_indent + decl_text + newline
+    insert_text = body_indent + decl_text.replace(newline, newline + body_indent) + newline
     return source[:line_start] + insert_text + source[line_start:]
 
 
@@ -619,13 +720,13 @@ def _insert_decl_after_index(source: str, after_idx: int, decl_text: str) -> str
     line_end = source.find("\n", after_idx)
     suffix = source[after_idx + 1:line_end if line_end >= 0 else len(source)].strip()
     if suffix and not suffix.startswith("//"):
-        insert_text = newline + indent + decl_text + newline
+        insert_text = newline + indent + decl_text.replace(newline, newline + indent) + newline
         return source[:after_idx + 1] + insert_text + source[after_idx + 1:]
     if line_end < 0:
         line_end = len(source)
     else:
         line_end += 1
-    insert_text = indent + decl_text + newline
+    insert_text = indent + decl_text.replace(newline, newline + indent) + newline
     return source[:line_end] + insert_text + source[line_end:]
 
 
@@ -644,8 +745,9 @@ def _nonansi_decl_insert_idx(source, mod_node):
     return _module_offsets(mod_node, source)["decl_insert_idx"]
 
 
-def _apply_ansi_add_port(source: str, close_idx: int, port_spec: dict[str, str]) -> str:
-    return _append_port_line_before_close(source, close_idx, compose_port_decl(port_spec))
+def _apply_ansi_add_port(source: str, close_idx: int, port_spec: dict[str, str], style=None) -> str:
+    return _append_connection_line_before_close(source, close_idx, _format_port_decl(port_spec, style),
+                                                indent=style["indent"] if style else None)
 
 
 def _apply_nonansi_add_port(
@@ -664,7 +766,7 @@ def _apply_nonansi_add_port(
     if after_idx < 0:
         return with_name
 
-    decl = compose_port_decl(port_spec) + ";"
+    decl = _format_port_decl(port_spec, _port_style(source, mi2["cst"])) + ";"
     if after_idx >= len(with_name):
         return _insert_decl_before_body(with_name, after_idx, decl)
     if with_name[after_idx] != ";":
@@ -706,7 +808,7 @@ def add_port(
         return source
 
     if mi["is_ansi"]:
-        edited = _apply_ansi_add_port(source, port_insert_idx, port_spec)
+        edited = _apply_ansi_add_port(source, port_insert_idx, port_spec, _port_style(source, mi["cst"]))
         return _validate_edit_or_raise(source, edited, parser, "add_port(ansi)") if validate else edited
 
     edited = _apply_nonansi_add_port(source, parser, module_name, port_insert_idx, port_spec)
@@ -937,6 +1039,20 @@ class vedit:
         self._mi_cache: Optional[dict] = None         # invalidated whenever _source changes
         self._instances_cached = False
 
+    @classmethod
+    def from_source_all(cls, source: str) -> list["vedit"]:
+        """Parse once and return editors sharing the immutable source CST.
+
+        Each editor owns its cache and edits; instances remain lazy. Mutating
+        one editor never mutates the shared syntax tree or another editor.
+        """
+        editors = []
+        for info in _analyze_modules(source, include_instances=False):
+            editor = cls(source, info["name"])
+            editor._mi_cache = info
+            editors.append(editor)
+        return editors
+
     # ── Cache management ────────────────────────────────────────────────────
 
     def _invalidate(self) -> None:
@@ -1036,6 +1152,7 @@ class vedit:
         try:
             mi = self._mi()
             is_ansi = mi.get("is_ansi", True)
+            style = _port_style(self._source, mi["cst"])
             changed = False
 
             if is_ansi:
@@ -1065,7 +1182,7 @@ class vedit:
                     if any(p.get("name") == name for p in mi.get("ports", [])):
                         continue
                     before_len = len(self._source)
-                    self._source = _apply_ansi_add_port(self._source, close_idx, info)
+                    self._source = _apply_ansi_add_port(self._source, close_idx, info, style)
                     close_idx += len(self._source) - before_len
                     changed = True
             else:
@@ -1097,7 +1214,7 @@ class vedit:
                     growth = len(self._source) - before_len
                     close_idx += growth
                     after_idx += growth
-                    declarations.append(compose_port_decl(info) + ";")
+                    declarations.append(_format_port_decl(info, style) + ";")
                     changed = True
                 if declarations:
                     decl_text = detect_newline(self._source).join(declarations)

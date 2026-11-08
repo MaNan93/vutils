@@ -6,6 +6,7 @@ CLI interface compatible with modeditor.
 """
 
 import argparse
+import difflib
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ class ExitCode:
     ERR_PARSE_FAIL = 2
     ERR_EDIT_FAIL = 3
     ERR_GEN_INST_FAIL = 4
+    CHECK_CHANGES = 1
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +230,11 @@ def print_hierarchy(all_modules: list[dict]) -> None:
 # Edit Dispatcher
 # ---------------------------------------------------------------------------
 
-def apply_edit_actions(source_text: str, mod_name: str, args: argparse.Namespace) -> tuple[str, bool]:
+def apply_edit_actions(source_text: str, mod_name: str, args: argparse.Namespace,
+                       *, editor: vedit | None = None) -> tuple[str, bool]:
     """Apply all edit flags to source text. Returns (new_text, changed)."""
     original = source_text
-    ed = vedit(source_text, mod_name)
+    ed = editor if editor is not None else vedit(source_text, mod_name)
 
     for spec_str in (args.add_port or []):
         spec = parse_add_port_spec(spec_str)
@@ -284,7 +287,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Parse / edit Verilog module ports with Tree-sitter SystemVerilog",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Run from the vutils repository (Python 3.12 recommended):\n"
+            "Examples (file paths are relative to the current directory):\n"
             "  uv run vutils --help\n"
             "  uv run vutils examples/test_parser.sv --module top --list-port all\n"
             "  uv run vutils design.sv --inst --inst-name u_design\n"
@@ -333,6 +336,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                            help="Write edits back to input file")
     out_group.add_argument("--output", dest="output_file", type=Path,
                            help="Write edited output to another file")
+    out_group.add_argument("--diff", action="store_true",
+                           help="Print a unified diff without writing files (requires an edit)")
+    parser.add_argument("--check", action="store_true",
+                        help="Do not write files; exit 1 if edits are needed, 0 if unchanged")
 
     return parser
 
@@ -341,17 +348,21 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    has_edit_action = any((
+        args.add_port, args.add_wire, args.add_inst_port,
+    ))
+    if (args.diff or args.check) and not has_edit_action:
+        parser.error("--diff and --check require --add-port, --add-wire or --add-inst-port")
+    if args.check and (args.inplace or args.output_file):
+        parser.error("--check cannot be combined with --inplace or --output")
     if not args.sv_file.exists():
         print(f"Error: Input file not found: {args.sv_file}")
         return ExitCode.ERR_FILE_NOT_FOUND
 
-    has_edit_action = any((
-        args.add_port, args.add_wire, args.add_inst_port,
-    ))
-
     try:
         source_text = args.sv_file.read_bytes().decode("utf-8")
-        module_names = vedit.list_modules(source_text)
+        editors = vedit.from_source_all(source_text)
+        module_names = [ed.module_name for ed in editors]
     except UnicodeDecodeError as e:
         print(f"Error: File encoding issue in {args.sv_file}")
         print(f"  Details: {e}")
@@ -364,11 +375,26 @@ def main() -> int:
     if has_edit_action:
         try:
             mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
-            new_text, changed = apply_edit_actions(source_text, mod_name, args)
+            editor = next(ed for ed in editors if ed.module_name == mod_name)
+            new_text, changed = apply_edit_actions(source_text, mod_name, args, editor=editor)
         except Exception as exc:
             print(f"Error: Edit operation failed")
             print(f"  Details: {exc}")
             return ExitCode.ERR_EDIT_FAIL
+
+        if args.diff:
+            for line in difflib.unified_diff(source_text.splitlines(keepends=True),
+                                             new_text.splitlines(keepends=True),
+                                             fromfile=str(args.sv_file), tofile=str(args.sv_file)):
+                sys.stdout.write(line)
+                if not line.endswith("\n"):
+                    sys.stdout.write("\n\\ No newline at end of file\n")
+        if args.check:
+            if not args.diff:
+                print("Changes needed." if changed else "No changes needed.")
+            return ExitCode.CHECK_CHANGES if changed else ExitCode.OK
+        if args.diff:
+            return ExitCode.OK
 
         if args.inplace:
             args.sv_file.write_bytes(new_text.encode("utf-8"))
@@ -389,7 +415,7 @@ def main() -> int:
     if args.inst:
         try:
             mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
-            module_info = vedit(source_text, mod_name).analyze(include_instances=False)
+            module_info = next(ed for ed in editors if ed.module_name == mod_name).analyze(include_instances=False)
             parts: list[str] = []
             if not args.inst_no_decl:
                 decl = gen_sig_decl(module_info)
@@ -411,9 +437,9 @@ def main() -> int:
         try:
             if args.module_name:
                 mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
-                all_mods = [vedit(source_text, mod_name).analyze()]
+                all_mods = [next(ed for ed in editors if ed.module_name == mod_name).analyze()]
             else:
-                all_mods = [vedit(source_text, name).analyze() for name in module_names]
+                all_mods = [ed.analyze() for ed in editors]
         except Exception as exc:
             print(f"Error: Failed to analyze module hierarchy")
             print(f"  Details: {exc}")
@@ -427,7 +453,7 @@ def main() -> int:
 
     try:
         mod_name = _resolve_module_name(module_names, args.module_name, args.sv_file)
-        module_info = vedit(source_text, mod_name).analyze(include_instances=False)
+        module_info = next(ed for ed in editors if ed.module_name == mod_name).analyze(include_instances=False)
     except Exception as exc:
         print(f"Error: Failed to analyze module")
         print(f"  Details: {exc}")
