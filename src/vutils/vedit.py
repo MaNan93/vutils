@@ -429,7 +429,7 @@ def _get_module_info(
 
 
 class _InterfaceParser(TreeSitterParser):
-    """Interface reads use lazy native wrappers; body nodes stay unallocated."""
+    """Extract interface metadata using lazy wrappers over the complete CST."""
 
 
 def _interface_result(mi: dict[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,9 @@
-# vutils 渐进优化：第二步
+# vutils 历史性能记录：第二步
+
+> **历史记录：Verible 后端，2026-10-11。** 本文的“现在”“当前”“后续”均指当时版本，
+> 不代表当前 Tree-sitter 实现或待办状态。原始数字保留用于追溯；当前脚本已迁移，
+> 不能直接复现本文的子进程、JSON 转换和节点构造指标。
+> 原始数据及复现范围见 [历史索引](docs/history/verible/README.md)，当前说明见 [迁移报告](TREE_SITTER_MIGRATION.md)。
 
 日期：2026-10-11。本轮生产修改仅涉及 `BranchNode.start/end` 的边界 token 查找；保留上一轮的 `gen_inst()` 缓存修复。
 
@@ -35,7 +40,7 @@
 
 该查询场景约快 6 倍，前后所有范围的 SHA-256 一致。初始解析过程不调用这些范围属性，因此不能把这个倍数解释为语法树构造或完整解析的加速。
 
-## 对当前 PCIe 流程的实际影响
+## 对当时 PCIe 流程的实际影响
 
 另做配对测量：7 个 SV 文件，各约 2,000 / 3,000 行，15 个 RAM；每种实现每个场景测三次，交替先后顺序，每轮在新 Python 进程和独立临时工程中执行。修改前版本通过临时恢复原有 `start/end` 属性实现得到，其他代码相同。
 
@@ -54,15 +59,21 @@
 
 vutils 目标测试 41 项、pciegen 目标测试 20 项通过。真实 RAM 生成的完整流程通过，对 11 个 SV 文件完成语法检查。`git diff --check` 通过。未据此宣称已运行整个仓库所有历史测试。
 
-## 数据与复现
+## 数据与复现范围
 
-- 分段与范围查询原始数据：`test/tree_ranges_before.json`、`test/tree_ranges_after.json`
-- 全流程配对原始数据：`test/range_pipeline_comparison.json`
-- 新增回归：`test/test_node_ranges.py`
+- 原始分段与范围查询：[修改前](docs/history/verible/measurements/tree_ranges_before.json)、[修改后](docs/history/verible/measurements/tree_ranges_after.json)
+- 原始外部流程对照：[range_pipeline_comparison.json](docs/history/verible/measurements/range_pipeline_comparison.json)
+- 对应回归：`test/test_node_ranges.py`
 
-在 `C:/Users/1/Desktop/code/vutils` 执行：
+历史脚本和外部环境要求见[历史索引](docs/history/verible/README.md)。当前原生 `SyntaxNode`
+直接读取并映射 Tree-sitter 范围；本文的可变 `BranchNode` 遍历实现不代表所有当前节点的范围实现。
 
-```powershell
-python test/benchmark_tree_ranges.py --lines 2500 --repeats 5 --output test/tree_ranges_recheck.json
-python -c "import sys, unittest; sys.path[:0]=['src', 'test']; unittest.main(module=None, argv=['unittest', 'test_node_ranges', 'test_gen_inst_cache', 'test_edit_batch', 'test_inst_port_regression', 'test_add_inst_port_macro'])"
+## 当前 Tree-sitter 基准
+
+当前脚本测量进程内解析与范围查询，不再输出 Verible/JSON 阶段计时：
+
+```bash
+mkdir -p artifacts
+uv run python test/benchmark_tree_ranges.py --lines 2500 --repeats 5 --output artifacts/tree_ranges_current.json
+uv run python -m unittest discover -s test -p test_node_ranges.py
 ```

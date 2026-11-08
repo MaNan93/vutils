@@ -1,4 +1,9 @@
-# vutils 渐进优化：第一步
+# vutils 历史性能记录：第一步
+
+> **历史记录：Verible 后端，2026-10-11。** 本文的“现在”“当前”“后续”均指当时版本，
+> 不代表当前 Tree-sitter 实现或待办状态。原始数字保留用于追溯；当前脚本已迁移，
+> 不能直接复现本文的子进程、JSON 转换和节点构造指标。
+> 原始数据及复现范围见 [历史索引](docs/history/verible/README.md)，当前说明见 [迁移报告](TREE_SITTER_MIGRATION.md)。
 
 日期：2026-10-11。本轮在此前已有改动基础上，生产代码只调整 `vedit.gen_inst()` 的缓存使用。
 
@@ -27,19 +32,25 @@
 - 真实 RAM 生成的 PCIe 完整流程通过，11 个 SV 文件语法检查通过。
 - `git diff --check` 通过。
 
-## 后续检查方向
+## 当时的后续检查方向
 
 单次解析仍会导出并构造整棵 CST；减少重复调用后，这部分仍是明显开销。CLI 还存在先 `list_modules()` 解析，再为选中模块建立编辑器重新解析的路径。后续可分别验证和修改，避免一次混合多个优化。本轮未改变 CLI、CST 转换、pciegen 或 ramgen 的实现。
 
 本次测量的带位宽声明比之前简单标量声明产生更多 JSON，说明行数相近的 RTL 也可能具有不同的解析成本。
 
-## 复现
+## 数据与复现范围
 
-在 `C:/Users/1/Desktop/code/vutils` 执行：
+原始数据：[修改前](docs/history/verible/measurements/inst_cache_before.json)、
+[修改后](docs/history/verible/measurements/inst_cache_after.json)。这两个文件记录本轮修改前后，
+不是最初 Git 版本的整体对比。历史脚本和外部环境要求见[历史索引](docs/history/verible/README.md)。
 
-```powershell
-python test/benchmark_inst_cache.py --lines 2500 --repeats 5 --output test/inst_cache_recheck.json
-python -c "import sys, unittest; sys.path[:0]=['src', 'test']; unittest.main(module=None, argv=['unittest', 'test_gen_inst_cache', 'test_edit_batch', 'test_inst_port_regression', 'test_add_inst_port_macro'])"
+当时记录的 CLI 重复解析路径已在后续版本中通过 `from_source_all()` 修复。
+
+## 当前 Tree-sitter 基准
+
+在当前仓库根目录执行以下命令会产生新结果，不复现上面的历史数字：
+
+```bash
+mkdir -p artifacts
+uv run python test/benchmark_inst_cache.py --lines 2500 --repeats 5 --output artifacts/inst_cache_current.json
 ```
-
-原始数据：`test/inst_cache_before.json`、`test/inst_cache_after.json`。这两个文件记录本轮修改前后，不是最初 Git 版本的整体对比。

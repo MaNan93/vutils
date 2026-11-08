@@ -488,7 +488,11 @@ def _recover_view(tree, source, base, view, inserted):
 
 
 def _parse_source(source: bytes):
-    """One in-process native parse (also the instrumentation point for tests)."""
+    """Parse one source view in-process, retrying once for recovery adaptation.
+
+    This is the source-level instrumentation point; a recovery retry may issue
+    a second native parse within the same call.
+    """
     base = _parsing_view(source)
     view, inserted = _parenthesize_system_casts(base)
     tree = Parser(_LANGUAGE).parse(view)
@@ -500,8 +504,9 @@ def _parse_source(source: bytes):
 class SyntaxNode(BranchNode):
     """Lazy Tree-sitter node adapter with original-text byte ranges.
 
-    ``tag`` is the native grammar node type. Child wrappers are built only on
-    access, so interface reads do not allocate Python objects for module bodies.
+    ``tag`` is the native grammar node type. Child wrappers are built on access.
+    Interface extraction can still materialize body wrappers, particularly when
+    scanning non-ANSI port declarations; this is not a header-only parse.
     ``native`` exposes the underlying tree-sitter Node, including field access.
     """
 

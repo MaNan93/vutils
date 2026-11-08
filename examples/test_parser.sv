@@ -1,4 +1,4 @@
-// Test file for verible_parser.py
+// Shared SystemVerilog fixture for vutils parser and editor examples/tests.
 // Covers: ANSI, non-ANSI, no ports, multiple instances, localparam, empty body
 
 // ---- Case 1: non-ANSI with multiple instances ----

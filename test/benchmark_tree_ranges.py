@@ -1,4 +1,8 @@
-"""Split parsing stages and measure CST range queries independently."""
+"""Measure source parsing and CST range queries independently.
+
+The legacy native_seconds field includes _parse_source's source-view preparation
+and any recovery retry, not just the native Parser.parse call.
+"""
 
 import argparse
 import gc

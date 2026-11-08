@@ -4,6 +4,8 @@
 不需要安装或配置 Verible。需要 Python 3.10+；仓库默认使用 Python 3.12。
 
 历史记录见 [CHANGELOG.md](CHANGELOG.md)，本次迁移验证见 [TREE_SITTER_MIGRATION.md](TREE_SITTER_MIGRATION.md)。
+当前待办见 [TODO.md](TODO.md)；Verible 时期的分析与性能数据见
+[历史资料索引](docs/history/verible/README.md)，不作为当前性能指标。
 
 ```bash
 uv sync --locked
@@ -111,6 +113,8 @@ print(module.text, module.start, module.end)
 
 `vedit.from_source_all(source)` 可以一次解析创建多个模块的 editor，分别编辑时互不影响。
 CLI 用它复用首次解析；正常读取路径只解析一次，单次编辑另做一次结果校验。
+这里按源码级解析调用计数；特定语法恢复适配可能在一次调用内重试原生解析。
+接口读取按需包装节点，非 ANSI 端口提取仍会遍历模块体。
 
 `parse_string`、`parse_file`、`parse_files` 返回 `SyntaxData`；支持 `gen_tree=False`、
 `gen_tokens=True`、`gen_rawtokens=True`。节点的 `tag` 使用 Tree-sitter 原生语法名，

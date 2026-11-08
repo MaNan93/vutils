@@ -1,4 +1,8 @@
-"""Compare complete and interface-only reads using paired native parses."""
+"""Compare complete and interface-only reads using paired source parses.
+
+The legacy native_* result fields measure _parse_source, including source-view
+preparation and any recovery retry; they are not bare Parser.parse timings.
+"""
 
 import argparse
 import gc

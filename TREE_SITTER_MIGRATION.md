@@ -61,7 +61,7 @@ uv run python examples/check_src.py ../src --output artifacts/tree-sitter-review
 
 - 新增端口继承相邻字段列和缩进；分隔符按最近的顶层逗号选择行尾、行首或独立行风格，忽略嵌套调用中的逗号。
 - `--diff` 预览 unified diff，`--check` 在需要修改时返回 1、无变化时返回 0，均不写文件；可以组合。
-- CLI 通过 `vedit.from_source_all` 复用首次解析。测试确认多模块 hierarchy 也只解析一次，单次编辑只有初始解析和结果校验。
+- CLI 通过 `vedit.from_source_all` 复用首次解析。测试确认多模块 hierarchy 也只有一次源码级解析调用，单次编辑另做结果校验；特定恢复适配可在一次调用内重试原生解析。
 - 已用可编辑工具安装到 `~/.local/bin/vutils`；在 home 和 `/tmp` 验证 `uv run vutils`。
 - 全局安装、离线 wheel 和检查返回码的使用方法见 [README](README.md)。
 

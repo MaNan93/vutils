@@ -1,4 +1,9 @@
-# vutils 渐进优化：第三步
+# vutils 历史性能记录：第三步
+
+> **历史记录：Verible 后端，2026-10-11。** 本文的“现在”“当前”“后续”均指当时版本，
+> 不代表当前 Tree-sitter 实现或待办状态。原始数字保留用于追溯；当前脚本已迁移，
+> 不能直接复现本文的子进程、JSON 转换和节点构造指标。
+> 原始数据及复现范围见 [历史索引](docs/history/verible/README.md)，当前说明见 [迁移报告](TREE_SITTER_MIGRATION.md)。
 
 日期：2026-10-11。本轮增加专用的只读接口 API，在端口/参数读取时减少 Python CST 节点构造。pciegen 的调用接入留到下一步。
 
@@ -45,14 +50,22 @@ parameter_declaration = info["parameter_declaration"]
 
 vutils 目标回归 53 项、pciegen 目标回归 20 项通过；真实 RAM 生成完整流程通过，11 个 SV 文件完成语法检查。`git diff --check` 通过。未运行全部历史测试。
 
-在 `C:/Users/1/Desktop/code/vutils` 执行：
+历史原始数据：[ANSI](docs/history/verible/measurements/interface_ansi_measurements.json)、
+[non-ANSI](docs/history/verible/measurements/interface_nonansi_measurements.json)。
+历史脚本和外部环境要求见[历史索引](docs/history/verible/README.md)。
 
-```powershell
-python test/benchmark_interface.py --lines 2500 --repeats 5 --output test/interface_ansi_measurements.json
-python test/benchmark_interface.py --lines 2500 --repeats 5 --nonansi --output test/interface_nonansi_measurements.json
-python -c "import sys, unittest; sys.path[:0]=['src','test']; unittest.main(module=None, argv=['unittest','test_read_interface','test_node_ranges','test_gen_inst_cache','test_edit_batch','test_inst_port_regression','test_add_inst_port_macro'])"
+当时的后续进展还引用了外部 pciegen 工程的 `PERFORMANCE_STEP_4.md`；该文件不属于本仓库，
+需在原工作区查阅，这里不再提供跨仓库相对链接。
+
+## 当前 Tree-sitter 基准
+
+当前接口元数据还包含 `imports`；节点使用惰性包装，非 ANSI 端口读取仍会扫描模块体，
+不再使用本文描述的 Verible JSON 裁剪流程。
+
+```bash
+mkdir -p artifacts
+uv run python test/benchmark_interface.py --lines 2500 --repeats 5 --output artifacts/interface_ansi_current.json
+uv run python test/benchmark_interface.py --lines 2500 --repeats 5 --nonansi --output artifacts/interface_nonansi_current.json
 ```
 
-测试：`test/test_read_interface.py`。配对测量脚本：`test/benchmark_interface.py`。原始数据：`test/interface_ansi_measurements.json`、`test/interface_nonansi_measurements.json`。
-
-后续进展：两个只读调用已接入 pciegen，全流程配对测量及验证见 [第四步记录](../pciegen/PERFORMANCE_STEP_4.md)。
+这些命令测量当前实现，不重现上面的历史百分比、JSON 字节数或节点构造数量。
