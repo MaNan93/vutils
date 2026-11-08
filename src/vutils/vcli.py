@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Command-line interface for Verilog/SystemVerilog module editing.
 
-Uses verible-verilog-syntax CST for precise source code navigation and editing.
+Uses Tree-sitter SystemVerilog CST for precise source code navigation and editing.
 CLI interface compatible with modeditor.
 """
 
@@ -198,7 +198,7 @@ def print_instance_tree(
     instances = row.get("instances", [])
     for idx, inst in enumerate(instances):
         branch = "\u2514\u2500 " if idx == len(instances) - 1 else "\u251c\u2500 "
-        print(f"{prefix}{branch}{inst['name']} ({inst['type']})")
+        print(f"{prefix}{branch}{inst.get('path', inst['name'])} ({inst['type']})")
         next_prefix = prefix + ("   " if idx == len(instances) - 1 else "\u2502  ")
         if inst["type"] in seen:
             continue
@@ -281,14 +281,14 @@ def _resolve_module_name(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Parse / edit Verilog module ports with verible-verilog-syntax",
+        description="Parse / edit Verilog module ports with Tree-sitter SystemVerilog",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Run from the vutils repository (Python 3.12 recommended):\n"
             "  uv run vutils --help\n"
-            "  uv run vutils examples/test_parser.sv --list-port all\n"
+            "  uv run vutils examples/test_parser.sv --module top --list-port all\n"
             "  uv run vutils design.sv --inst --inst-name u_design\n"
-            "Requires verible-verilog-syntax via VERIBLE_BIN, PATH or the nearby misc/verible directory."
+            "Tree-sitter runs in-process; no external parser executable is required."
         ),
     )
     parser.add_argument("sv_file", type=Path, help="Path to .v/.sv file")
@@ -326,7 +326,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--add-wire", dest="add_wire", action="append", metavar="SPEC",
                         help="Add wire: 'type, width, name, dimension' (repeatable)")
     parser.add_argument("--add-inst-port", dest="add_inst_port", action="append", metavar="SPEC",
-                        help="Add instance port: 'instname, port, wire' (repeatable)")
+                        help="Add instance port: 'instname or generate.scope.instname, port, wire' (repeatable)")
 
     out_group = parser.add_mutually_exclusive_group()
     out_group.add_argument("--inplace", action="store_true", dest="inplace",
@@ -350,7 +350,7 @@ def main() -> int:
     ))
 
     try:
-        source_text = args.sv_file.read_text(encoding="utf-8")
+        source_text = args.sv_file.read_bytes().decode("utf-8")
         module_names = vedit.list_modules(source_text)
     except UnicodeDecodeError as e:
         print(f"Error: File encoding issue in {args.sv_file}")

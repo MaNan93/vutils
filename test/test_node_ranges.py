@@ -4,7 +4,7 @@ import unittest
 
 from vutils.vparser import (
     BranchNode, LeafNode, PostOrderTreeIterator, PreOrderTreeIterator,
-    RootNode, SyntaxData, TokenNode, VeribleParser,
+    RootNode, SyntaxData, TokenNode, TreeSitterParser,
 )
 
 
@@ -62,7 +62,7 @@ class NodeRangeTests(unittest.TestCase):
         source = ("module top #(parameter W=8)(input logic signed [W-1:0] a [2], output logic b);\n"
                   "sub #(.W(W)) u0(.a(a[0]), .b(b));\n"
                   "generate if (W>1) begin: g wire [W-1:0] x=a[1]; end endgenerate\nendmodule")
-        data = VeribleParser().parse_string(source)
+        data = TreeSitterParser().parse_string(source)
         self.assertFalse(data.errors)
         for branch in PreOrderTreeIterator(data.tree):
             if not isinstance(branch, BranchNode):

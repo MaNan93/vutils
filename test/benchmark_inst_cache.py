@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import statistics
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -12,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from vutils.vedit import vedit
-from vutils.vparser import VERIBLE
+from vutils.vparser import _parse_source
 
 
 def benchmark(lines=2500, repeats=5):
@@ -23,18 +22,16 @@ def benchmark(lines=2500, repeats=5):
         + "endmodule\n"
     )
     runs = []
-    real_run = subprocess.run
+    real_run = _parse_source
     for _ in range(repeats):
-        counts = {"calls": 0, "tree_calls": 0, "stdout_bytes": 0}
+        counts = {"calls": 0}
 
         def measured_run(*args, **kwargs):
             result = real_run(*args, **kwargs)
             counts["calls"] += 1
-            counts["tree_calls"] += int("--printtree" in args[0])
-            counts["stdout_bytes"] += len(result.stdout or b"")
             return result
 
-        with patch("vutils.vparser.subprocess.run", side_effect=measured_run):
+        with patch("vutils.vparser._parse_source", side_effect=measured_run):
             start = time.perf_counter()
             editor = vedit(source, "top")
             first = editor.gen_inst(instance_name="u_top", port_map={"a": "data_in"})
@@ -48,7 +45,7 @@ def benchmark(lines=2500, repeats=5):
                                           sort_keys=True).encode("utf-8")).hexdigest()
         runs.append({"seconds": round(elapsed, 4), **counts, "output_sha256": digest})
     assert len({r["output_sha256"] for r in runs}) == 1
-    return {"binary": VERIBLE, "body_lines": lines, "instances": 15, "repeats": repeats,
+    return {"backend": "tree-sitter-systemverilog", "body_lines": lines, "instances": 15, "repeats": repeats,
             "source_bytes": len(source.encode("utf-8")),
             "median_seconds": round(statistics.median(r["seconds"] for r in runs), 4),
             "excludes_startup_and_imports": True, "runs": runs}

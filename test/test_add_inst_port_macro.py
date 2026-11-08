@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from vutils.vedit import vedit
-from vutils.vparser import VeribleParser
+from vutils.vparser import TreeSitterParser
 
 
 MACRO_SV = """\
@@ -77,9 +77,7 @@ class TestAddInstPortMacro(unittest.TestCase):
         """Instance type should be the macro text."""
         ed = self._write_and_open(MACRO_SV)
         inst = next(i for i in ed.instances if i["name"] == "u_adder0")
-        # verible expands macros, so the type should resolve to 'adder'
-        # or be the macro reference
-        self.assertIn(inst["type"], ("adder", "`MY_ADDER"))
+        self.assertEqual(inst["type"], "`MY_ADDER")
 
     def test_add_inst_port_to_macro_instance(self):
         """add_inst_port should work when instance was macro-instantiated."""
@@ -114,49 +112,14 @@ class TestAddInstPortMacro(unittest.TestCase):
         self.assertIn("already connected", str(ctx.exception))
 
     # ------------------------------------------------------------------
-    def test_parse_debug(self):
-        """Raw CST inspection: what does verible produce for macro inst."""
-        source = """\
-`define MY_ADDER adder
-module top();
-    `MY_ADDER u0 (.a(a), .b(b));
-endmodule
-"""
-        parser = VeribleParser()
-        data = parser.parse_string(source, options={"gen_tree": True, "skip_null": True})
-        self.assertIsNotNone(data)
-        self.assertIsNotNone(data.tree)
-
-        # Find kModuleDeclaration
-        mod = data.tree.find({"tag": "kModuleDeclaration"})
-        self.assertIsNotNone(mod, "kModuleDeclaration not found in CST")
-
-        # Find kInstantiationBase
-        inst_base = mod.find({"tag": "kInstantiationBase"})
-        self.assertIsNotNone(inst_base, "kInstantiationBase not found - macro may affect CST")
-
-        # Print CST tags under kInstantiationBase for diagnosis
-        def collect_tags(node, depth=0):
-            lines = []
-            tag = getattr(node, "tag", "?")
-            lines.append(f"{'  ' * depth}{tag}")
-            for child in getattr(node, "children", []):
-                lines.extend(collect_tags(child, depth + 1))
-            return lines
-
-        tags = collect_tags(inst_base)
-        print("\n--- CST tags under kInstantiationBase ---")
-        for t in tags:
-            print(t)
-
-        # The kInstantiationType exists even with macro?
-        itype = inst_base.find({"tag": "kInstantiationType"})
-        print(f"\nkInstantiationType found: {itype is not None}")
-        if itype:
-            print(f"kInstantiationType text: '{getattr(itype, 'text', '')}'")
-            # Check children of itype
-            for c in getattr(itype, "children", []):
-                print(f"  child: tag={getattr(c, 'tag', '?')} text='{getattr(c, 'text', '')}'")
+    def test_macro_cst_keeps_original_text_and_offsets(self):
+        source = "`define MY_ADDER adder\nmodule top(); `MY_ADDER u0 (.a(a), .b(b)); endmodule"
+        data = TreeSitterParser().parse_string(source)
+        self.assertFalse(data.errors)
+        inst = data.tree.find({"tag": "module_instantiation"})
+        self.assertIsNotNone(inst)
+        self.assertEqual(inst.field("instance_type").text, "`MY_ADDER")
+        self.assertEqual(source.encode()[inst.start:inst.end].decode(), inst.text)
 
 
 if __name__ == "__main__":

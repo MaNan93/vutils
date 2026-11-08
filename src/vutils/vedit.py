@@ -8,30 +8,9 @@ from typing import Any, Optional, TypedDict, Union
 
 from .vparser import (
     COMMON_TYPES,
-    INVALID_POSITION,
-    INVALID_RANGE,
-    PostOrderTreeIterator,
     PreOrderTreeIterator,
-    VeribleParser,
-    find_all,
-    get_node_range,
-)
-
-_KEYWORDS = frozenset(
-    {
-        "module",
-        "endmodule",
-        "input",
-        "output",
-        "inout",
-        "ref",
-        "wire",
-        "reg",
-        "logic",
-        "bit",
-        "parameter",
-        "localparam",
-    }
+    TreeSitterParser,
+    module_nodes,
 )
 
 _OPAQUE_SOURCE = r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\[\s\S]|[^"\\])*"|\\[^\s]+'
@@ -187,365 +166,223 @@ def apply_text_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _find_first_identifier_child(node: Any) -> Optional[Any]:
-    """Find first direct child node with identifier tag."""
-    for child in getattr(node, "children", []):
-        if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
-            return child
-    return None
+_IDENTIFIERS = {"simple_identifier", "escaped_identifier"}
+_HEADER_TAGS = {"module_ansi_header", "module_nonansi_header"}
+_PORT_LIST_TAGS = {"list_of_port_declarations", "list_of_ports"}
 
 
-def _find_first_identifier_in_subtree(node: Any) -> Optional[Any]:
-    """Find first descendant node with identifier tag."""
-    return node.find(
-        {"tag": ["SymbolIdentifier", "EscapedIdentifier"]},
-        iter_=PreOrderTreeIterator,
-    )
+def _direct(node, tags):
+    return next((child for child in node.children if child.tag in tags), None) if node else None
 
 
-def _new_parser() -> VeribleParser:
-    return VeribleParser()
+def _field(node, name):
+    return node.field(name) if hasattr(node, "field") else None
 
 
-def _parse_tree(source: str, parser: Optional[VeribleParser] = None):
-    p = parser if parser is not None else _new_parser()
-    data = p.parse_string(source, options={"gen_tree": True, "skip_null": True})
-    if data is None or data.tree is None:
-        raise ValueError("Unable to parse source")
+def _find_first_identifier_child(node):
+    return _direct(node, _IDENTIFIERS)
+
+
+def _new_parser():
+    return TreeSitterParser()
+
+
+def _parse_tree(source, parser=None):
+    data = (parser or _new_parser()).parse_string(source)
     if data.errors:
         details = "; ".join(f"{e.line + 1}:{e.column + 1}: {e.message or e.phase}" for e in data.errors)
         raise ValueError(f"Invalid Verilog syntax: {details}")
     return data.tree
 
 
-def _desc_text(node: Any) -> str:
-    text = getattr(node, "text", "")
-    return text.strip() if isinstance(text, str) else ""
+def _desc_text(node):
+    return node.text.strip() if node is not None else ""
 
 
-def _find_module_nodes(tree: Any) -> list[Any]:
-    return tree.find_all({"tag": "kModuleDeclaration"}, iter_=PreOrderTreeIterator)
+def _find_module_nodes(tree):
+    return module_nodes(tree)
 
 
-def _module_nodes(mod: Any, tags, *, stop_tags=()):
-    """Traverse a module's scope without entering nested definitions."""
-    stopped = {"kModuleDeclaration", "kFunctionDeclaration", "kTaskDeclaration",
-               "kClassDeclaration", *stop_tags}
+def _module_nodes(mod, tags, *, stop_tags=()):
+    """Traverse a module's lexical scope, never nested definitions."""
+    stopped = {"module_declaration", "function_declaration", "task_declaration",
+               "class_declaration", *stop_tags}
     stack = [mod]
     while stack:
         node = stack.pop()
-        if node is not mod and getattr(node, "tag", "") in stopped:
+        if node is not mod and node.tag in stopped:
             continue
-        if getattr(node, "tag", "") in tags:
+        if node.tag in tags:
             yield node
-        stack.extend(reversed(getattr(node, "children", ())))
+        if hasattr(node, "children") and node.tag not in tags:
+            stack.extend(reversed(node.children))
 
 
-def _byte_to_char_index(source: str, byte_index: int) -> int:
-    """Convert a Verible byte offset only at the Python string-edit boundary."""
+def _byte_to_char_index(source, byte_index):
     if byte_index < 0 or source.isascii():
         return byte_index
     return len(source.encode("utf-8")[:byte_index].decode("utf-8"))
 
 
-def _header_port_decl_list(header: Any) -> Optional[Any]:
-    if not header:
-        return None
-    return header.find({"tag": "kPortDeclarationList"}, iter_=PreOrderTreeIterator)
+def _header(mod):
+    return _direct(mod, _HEADER_TAGS)
 
 
-def _header_port_paren_group(header: Any) -> Optional[Any]:
-    plist = _header_port_decl_list(header)
-    cur = plist
-    while cur is not None:
-        if getattr(cur, "tag", "") == "kParenGroup":
-            return cur
-        cur = getattr(cur, "parent", None)
-    return None
+def _header_port_decl_list(header):
+    return _direct(header, _PORT_LIST_TAGS)
 
 
-def _module_name(mod: Any, source: str) -> str:
-    header = mod.find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    if not header:
-        return "<unknown>"
-
-    # Prefer direct header child identifier to avoid picking nested identifiers.
-    for child in getattr(header, "children", []):
-        if getattr(child, "tag", "") in ("SymbolIdentifier", "EscapedIdentifier"):
-            name = _desc_text(child)
-            if name:
-                return name
-
-    n = header.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
-    return _desc_text(n) if n else "<unknown>"
+def _module_name(mod, source):
+    return _desc_text(_field(_header(mod), "name"))
 
 
-def _is_ansi_module(mod: Any) -> bool:
-    header = mod.find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    if not header:
-        return False
-    plist = _header_port_decl_list(header)
-    if not plist:
-        return False
-    ansi_decls = plist.find_all({"tag": "kPortDeclaration"}, iter_=PreOrderTreeIterator)
-    # In an ANSI list, subsequent names may inherit the preceding declaration
-    # (input [7:0] a, b); Verible represents those names as kPort nodes too.
-    return bool(ansi_decls)
+def _is_ansi_module(mod):
+    plist = _header_port_decl_list(_header(mod))
+    return plist is not None and plist.tag == "list_of_port_declarations"
 
 
-def _extract_port_fields_from_decl(pd: Any, source: str) -> dict[str, str]:
-    direction = ""
-    ptype = ""
-    width = ""
-    dimension = ""
-    name = ""
-
-    d = pd.find({"tag": ["input", "output", "inout", "ref"]}, iter_=PreOrderTreeIterator)
-    if d:
-        direction = getattr(d, "tag", "")
-
-    dt = pd.find({"tag": "kDataType"}, iter_=PreOrderTreeIterator)
-    if dt:
-        packed = dt.find({"tag": "kPackedDimensions"}, iter_=PreOrderTreeIterator)
-        if not packed:
-            packed = dt.find({"tag": "kDeclarationDimensions"}, iter_=PreOrderTreeIterator)
-        if packed:
-            width = _desc_text(packed)
-
-        ptype = _desc_text(dt)
-        if width:
-            ptype = ptype.replace(width, "", 1).strip()
-
-    # Array-bound identifiers must not replace the actual port name.
-    for child in getattr(pd, "children", []):
-        tag = getattr(child, "tag", "")
-        if tag == "kUnpackedDimensions":
-            dimension = _desc_text(child)
-        elif tag in ("SymbolIdentifier", "EscapedIdentifier", "kUnqualifiedId"):
-            name = _desc_text(child)
-        elif tag in ("wire", "reg", "logic", "bit", "tri"):
-            ptype = " ".join(filter(None, (tag, ptype)))
-
-    ids = pd.find_all({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
-    if not name:
-        for i in ids:
-            t = _desc_text(i)
-            if t and t not in _KEYWORDS:
-                name = t
-
-    if not ptype and direction:
-        t = pd.find({"tag": ["wire", "reg", "logic", "bit", "tri"]}, iter_=PreOrderTreeIterator)
-        if t:
-            ptype = getattr(t, "tag", "")
-
-    return {
-        "name": name,
-        "direction": direction,
-        "type": ptype,
-        "width": width,
-        "dimension": dimension,
-    }
+def _declaration_type(decl, name):
+    """Separate the declaration prefix and only its outer packed dimensions."""
+    raw = decl.syntax_data.source_code
+    prefix = raw[decl.start:name.start]
+    dt = decl.find({"tag": ["data_type", "implicit_data_type"]}, iter_=PreOrderTreeIterator)
+    dims = [c for c in dt.children if c.tag == "packed_dimension"] if dt else []
+    dims = [c for c in dims if c.end <= name.start]
+    width = "".join(c.text for c in dims)
+    for dim in reversed(dims):
+        prefix = prefix[:dim.start-decl.start] + prefix[dim.end-decl.start:]
+    typ = re.sub(r"/\*[\s\S]*?\*/|//[^\n]*", " ", prefix.decode("utf-8"))
+    typ = re.sub(r"^\s*(?:input|output|inout|ref)\b\s*", "", typ).strip()
+    return typ, width
 
 
-def _extract_ports(mod: Any, source: str, is_ansi: bool) -> list[dict[str, str]]:
-    ports: list[dict[str, str]] = []
-    header = mod.find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    if not header:
-        return ports
-
-    plist = _header_port_decl_list(header)
-    if not plist:
-        return ports
-
+def _extract_ports(mod, source, is_ansi):
+    plist = _header_port_decl_list(_header(mod))
+    if plist is None:
+        return []
+    ports = []
     if is_ansi:
-        previous: dict[str, str] = {}
-        for pd in getattr(plist, "children", []):
-            if pd.tag == "kPortDeclaration":
-                info = _extract_port_fields_from_decl(pd, source)
-                previous = info
-            elif pd.tag == "kPort":
-                sid = pd.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
-                dimensions = pd.find({"tag": ["kUnpackedDimensions", "kDeclarationDimensions"]}, iter_=PreOrderTreeIterator)
-                info = {**previous, "name": _desc_text(sid) if sid else "",
-                        "dimension": _desc_text(dimensions) if dimensions else ""}
-            else:
+        previous = {"direction": "inout", "type": "", "width": ""}
+        for pd in plist.children:
+            if pd.tag != "ansi_port_declaration":
                 continue
-            if info["name"]:
-                ports.append(info)
+            name = _field(pd, "port_name")
+            if name is None:
+                raise ValueError("Unsupported ANSI port declaration: " + pd.text)
+            header = _direct(pd, {"net_port_header", "variable_port_header", "interface_port_header"})
+            direction = header.find({"tag": "port_direction"}) if header else None
+            if header:
+                typ, width = _declaration_type(pd, name)
+                info = {"direction": _desc_text(direction) or previous["direction"], "type": typ, "width": width}
+                if header.tag == "interface_port_header":
+                    info.update(direction="", interface=True,
+                                interface_type=_desc_text(_field(header, "interface_name")),
+                                modport=_desc_text(_field(header, "modport_name")))
+            else:
+                info = {key: value for key, value in previous.items() if key not in {"name", "dimension"}}
+            info.update(name=_desc_text(name), dimension="".join(c.text for c in pd.children
+                                                                if c.tag == "unpacked_dimension"))
+            ports.append(info)
+            previous = info
         return ports
 
-    # non-ANSI: header has names only; direction/type/width come from body declarations
-    for p in plist.find_all({"tag": "kPort"}, iter_=PreOrderTreeIterator):
-        pid = p.find({"tag": ["SymbolIdentifier", "EscapedIdentifier"]}, iter_=PreOrderTreeIterator)
-        if pid:
-            nm = _desc_text(pid)
-            if nm:
-                ports.append(
-                    {
-                        "name": nm,
-                        "direction": "",
-                        "type": "",
-                        "width": "",
-                        "dimension": "",
-                    }
-                )
-
-    by_name = {p["name"]: p for p in ports}
-    for pd in _module_nodes(mod, {"kModulePortDeclaration"}):
-        info = _extract_port_fields_from_decl(pd, source)
-        if not info["direction"] and not info["type"] and not info["width"]:
+    for pd in plist.children:
+        if pd.tag != "port":
             continue
-
-        declarators = pd.find_all({"tag": "kIdentifierUnpackedDimensions"}, iter_=PreOrderTreeIterator)
-        for declarator in declarators:
-            sid = _find_first_identifier_child(declarator)
-            if sid is None:
-                sid = _find_first_identifier_in_subtree(declarator)
-            nm = _desc_text(sid) if sid else ""
-            if nm in by_name:
-                by_name[nm]["direction"] = info["direction"]
-                by_name[nm]["type"] = info["type"]
-                by_name[nm]["width"] = info["width"]
-                dimensions = declarator.find({"tag": "kUnpackedDimensions"}, iter_=PreOrderTreeIterator)
-                by_name[nm]["dimension"] = _desc_text(dimensions) if dimensions else ""
-
+        name = _find_first_identifier_child(pd)
+        if name is None:
+            raise ValueError("Unsupported non-ANSI port expression: " + pd.text)
+        ports.append({"name": _desc_text(name), "direction": "", "type": "", "width": "", "dimension": ""})
+    by_name = {p["name"]: p for p in ports}
+    for pd in _module_nodes(mod, {"port_declaration"}):
+        lists = pd.find_all({"tag": ["list_of_port_identifiers", "list_of_variable_identifiers",
+                                    "list_of_variable_port_identifiers"]}, iter_=PreOrderTreeIterator)
+        for declarations in lists:
+            names = [c for c in declarations.children if c.tag in _IDENTIFIERS]
+            if not names:
+                continue
+            typ, width = _declaration_type(pd, names[0])
+            direction = pd.find({"tag": ["input", "output", "inout", "ref"]})
+            current = None
+            for child in declarations.children:
+                if child.tag in _IDENTIFIERS:
+                    current = by_name.get(_desc_text(child))
+                    if current is not None:
+                        current.update(direction=_desc_text(direction), type=typ, width=width, dimension="")
+                elif child.tag == "unpacked_dimension" and current is not None:
+                    current["dimension"] += child.text
     return ports
 
 
-def _extract_param_names(mod: Any) -> list[str]:
-    out: list[str] = []
-    header = mod.find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    if not header:
-        return out
-    for p in header.find_all({"tag": "kParamDeclaration"}, iter_=PreOrderTreeIterator):
-        declaration = p.find({"tag": ["kParamType", "kTypeAssignment"]}, iter_=PreOrderTreeIterator)
-        pid = _find_first_identifier_child(declaration) if declaration else None
-        if pid is None and declaration:
-            for child in getattr(declaration, "children", []):
-                if child.tag == "kUnqualifiedId":
-                    pid = _find_first_identifier_in_subtree(child)
-                    break
-        if pid:
-            t = _desc_text(pid)
-            if t:
-                out.append(t)
-    return out
-
-
-def _extract_instances(mod: Any) -> list[dict[str, Any]]:
-    def _pick_inst_type(inst_base: Any) -> str:
-        itype = inst_base.find({"tag": "kInstantiationType"}, iter_=PreOrderTreeIterator)
-        if not itype:
-            return ""
-        for sid in itype.find_all(
-            {"tag": ["SymbolIdentifier", "EscapedIdentifier", "MacroIdentifier"]},
-            iter_=PreOrderTreeIterator,
-        ):
-            t = _desc_text(sid)
-            if t and t not in _KEYWORDS and t not in COMMON_TYPES:
-                return t
-        return ""
-
-    def _pick_gate_instance_name(ginst: Any, gi_start: int, gi_end: int) -> tuple[str, int]:
-        # Prefer direct child identifier, which is the instance name in GateInstance.
-        sid = _find_first_identifier_child(ginst)
-        if sid:
-            name = _desc_text(sid)
-            if name:
-                return name, int(sid.start) if sid.start is not None else gi_start
-
-        # Fallback: first identifier token in the GateInstance subtree.
-        sid = _find_first_identifier_in_subtree(ginst)
-        if sid:
-            name = _desc_text(sid)
-            if name:
-                return name, int(sid.start) if sid.start is not None else gi_start
-
-        return "", gi_start
-
-    instances: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-
-    for inst_base in _module_nodes(mod, {"kInstantiationBase"}):
-        inst_type = _pick_inst_type(inst_base)
-        if not inst_type:
-            # Skip declarations/non-module-instantiation statements that may share this node kind.
+def _extract_param_names(mod):
+    params = _direct(_header(mod), {"parameter_port_list"})
+    if params is None:
+        return []
+    names = []
+    for node in params.find_all({"tag": ["param_assignment", "type_assignment"]}, iter_=PreOrderTreeIterator):
+        ancestor = node.parent
+        while ancestor is not params and ancestor is not None and ancestor.tag != "local_parameter_declaration":
+            ancestor = ancestor.parent
+        if ancestor is not None and ancestor.tag == "local_parameter_declaration":
             continue
+        name = _field(node, "name") or _find_first_identifier_child(node)
+        if name:
+            names.append(_desc_text(name))
+    return names
 
-        for ginst in inst_base.find_all({"tag": "kGateInstance"}, iter_=PreOrderTreeIterator):
-            gs, ge = get_node_range(ginst)
-            if gs >= INVALID_POSITION or ge <= gs:
+
+def _instance_name(ginst):
+    return _field(_direct(ginst, {"name_of_instance"}), "instance_name")
+
+
+def _extract_instances(mod):
+    instances = []
+    for inst in _module_nodes(mod, {"module_instantiation"}):
+        typ = _field(inst, "instance_type")
+        for gate in inst.children:
+            if gate.tag != "hierarchical_instance":
                 continue
-
-            inst_name, inst_offset = _pick_gate_instance_name(ginst, gs, ge)
-            if not inst_name or inst_name in _KEYWORDS:
+            name = _instance_name(gate)
+            close = next((c for c in reversed(gate.children) if c.tag == ")"), None)
+            if name is None or close is None:
                 continue
-
-            port_close_idx = -1
-            paren = ginst.find({"tag": "kParenGroup"}, iter_=PreOrderTreeIterator)
-            if paren:
-                close_leaf = paren.find({"tag": ")"}, iter_=PostOrderTreeIterator, reverse_children=True)
-                if close_leaf and close_leaf.start is not None:
-                    port_close_idx = int(close_leaf.start)
-
-            if port_close_idx < 0:
-                continue
-
-            key = (inst_name, inst_offset)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            instances.append(
-                {
-                    "name": inst_name,
-                    "type": inst_type,
-                    "offset": inst_offset,
-                    "port_close_idx": port_close_idx,
-                }
-            )
-
+            scopes = []
+            parent = gate.parent
+            while parent is not None and parent is not mod:
+                if parent.tag == "generate_block":
+                    label = _field(parent, "name")
+                    if label:
+                        scopes.append(_desc_text(label))
+                parent = parent.parent
+            instances.append({"name": _desc_text(name), "type": _desc_text(typ),
+                              "path": ".".join([*reversed(scopes), _desc_text(name)]),
+                              "offset": name.start, "port_close_idx": close.start})
     return instances
 
 
-def _module_offsets(mod: Any, source: Optional[str] = None) -> dict[str, int]:
-    header = mod.find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    close_idx = -1
-    if header:
-        paren = _header_port_paren_group(header)
-        if paren:
-            close_leaf = paren.find({"tag": ")"}, iter_=PostOrderTreeIterator, reverse_children=True)
-            if close_leaf and close_leaf.start is not None:
-                close_idx = close_leaf.start
+def _select_instance(instances, name, module_name):
+    matches = [i for i in instances if i["name"] == name or i.get("path") == name]
+    if not matches:
+        raise ValueError(f"Instance '{name}' not found in module '{module_name}'")
+    if len(matches) > 1:
+        paths = ", ".join(i.get("path", i["name"]) for i in matches)
+        raise ValueError(f"Ambiguous instance '{name}' in module '{module_name}': {paths}. Specify a scope path.")
+    return matches[0]
 
-    mod_start, mod_end = get_node_range(mod)
 
-    decl_insert_idx = -1
-    item_list = mod.find({"tag": "kModuleItemList"}, iter_=PreOrderTreeIterator)
-    if item_list:
-        for c in getattr(item_list, "children", []):
-            s, _ = get_node_range(c)
-            if s < INVALID_POSITION:
-                decl_insert_idx = s
-                break
-
-    if decl_insert_idx < 0:
-        end_kw = mod.find({"tag": "endmodule"}, iter_=PostOrderTreeIterator, reverse_children=True)
-        if end_kw and end_kw.start is not None:
-            decl_insert_idx = end_kw.start
-
-    offsets = {
-        "port_insert_idx": close_idx,
-        "decl_insert_idx": decl_insert_idx,
-        "mod_start": mod_start,
-        "mod_end": mod_end,
-    }
+def _module_offsets(mod, source=None):
+    plist = _header_port_decl_list(_header(mod))
+    close = next((c for c in reversed(plist.children) if c.tag == ")"), None) if plist else None
+    body = next((c for c in mod.children if c.tag not in _HEADER_TAGS and c.tag != "comment"), None)
+    offsets = {"port_insert_idx": close.start if close else -1,
+               "decl_insert_idx": body.start if body else -1,
+               "mod_start": mod.start, "mod_end": mod.end}
     return {key: _byte_to_char_index(source, value) for key, value in offsets.items()} if source is not None else offsets
 
 
 def _analyze_modules(
     source: str,
-    parser: Optional[VeribleParser] = None,
+    parser: Optional[TreeSitterParser] = None,
     *,
     include_instances: bool = True,
 ) -> list[dict[str, Any]]:
@@ -561,6 +398,7 @@ def _analyze_modules(
                 "cst": mod,
                 "ports": _extract_ports(mod, source, is_ansi),
                 "param_names": _extract_param_names(mod),
+                "imports": [c.text for c in _header(mod).children if c.tag == "package_import_declaration"],
                 "instances": _extract_instances(mod) if include_instances else [],
             }
         )
@@ -570,7 +408,7 @@ def _analyze_modules(
 def _get_module_info(
     source: str,
     module_name: Optional[str],
-    parser: Optional[VeribleParser] = None,
+    parser: Optional[TreeSitterParser] = None,
     *,
     include_instances: bool = True,
 ) -> dict[str, Any]:
@@ -589,21 +427,19 @@ def _get_module_info(
     return mods[0]
 
 
-class _InterfaceParser(VeribleParser):
-    """Internal parser whose partial tree must never enter an editor cache."""
-
-    _transform_tree = staticmethod(VeribleParser._transform_interface_tree)
+class _InterfaceParser(TreeSitterParser):
+    """Interface reads use lazy native wrappers; body nodes stay unallocated."""
 
 
 def _interface_result(mi: dict[str, Any]) -> dict[str, Any]:
-    header = mi["cst"].find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-    params = header.find({"tag": "kFormalParameterListDeclaration"}, iter_=PreOrderTreeIterator) if header else None
+    params = _direct(_header(mi["cst"]), {"parameter_port_list"})
     return {
         "name": mi["name"],
         "module_name": mi["name"],
         "is_ansi": mi["is_ansi"],
         "ports": mi["ports"],
         "param_names": mi["param_names"],
+        "imports": mi["imports"],
         "parameter_declaration": _desc_text(params) if params else "",
     }
 
@@ -611,7 +447,7 @@ def _interface_result(mi: dict[str, Any]) -> dict[str, Any]:
 def read_interface(source: str, module_name: Optional[str] = None) -> dict[str, Any]:
     """Read ports and header parameters after validating the complete source.
 
-    Construct only interface CST nodes. Return plain metadata without a CST or
+    Wrap only the CST nodes needed by interface extraction. Return plain metadata without a CST or
     instances; use ``vedit`` for source editing and instance/hierarchy analysis.
     Multiple modules require an explicit name.
     """
@@ -631,7 +467,7 @@ def read_interface_from_file(
     selection, this interface-only API does not select modules by instance.
     """
     fpath = Path(path)
-    source = fpath.read_text(encoding="utf-8")
+    source = fpath.read_bytes().decode("utf-8")
     parser = _InterfaceParser()
     if module_name is not None or not auto_select:
         return _interface_result(_get_module_info(source, module_name, parser, include_instances=False))
@@ -740,7 +576,7 @@ def _align_to_char(source: str, idx: int, ch: str) -> int:
 def _validate_edit_or_raise(
     original_source: str,
     edited_source: str,
-    parser: Optional[VeribleParser],
+    parser: Optional[TreeSitterParser],
     action: str,
 ) -> str:
     """Validate edited source by reparsing; raise without mutating on failure."""
@@ -793,37 +629,18 @@ def _insert_decl_after_index(source: str, after_idx: int, decl_text: str) -> str
     return source[:line_end] + insert_text + source[line_end:]
 
 
-def _nonansi_decl_insert_idx(source: str, mod_node: Any) -> int:
-    """Prefer insertion after ';' of leading non-ANSI port declarations."""
-    item_list = mod_node.find({"tag": "kModuleItemList"}, iter_=PreOrderTreeIterator)
-    if item_list:
-        children = list(getattr(item_list, "children", []))
-        last_port_decl = None
-        next_non_port_start = -1
-        for idx, c in enumerate(children):
-            if getattr(c, "tag", "") != "kModulePortDeclaration":
-                s, _ = get_node_range(c)
-                if s < INVALID_POSITION:
-                    next_non_port_start = _byte_to_char_index(source, s)
-                break
-            last_port_decl = c
-
-        if last_port_decl is not None:
-            s, e = get_node_range(last_port_decl)
-            if s < INVALID_POSITION:
-                # Search from the END of the declaration, not before its start.
-                # Using s-2 could match the ';' on the previous line.
-                e = _byte_to_char_index(source, e)
-                search_start = e
-                if next_non_port_start > search_start:
-                    search_end = next_non_port_start
-                else:
-                    search_end = min(len(source), max(e + 128, search_start + 1))
-
-                semi = source.find(";", search_start, search_end)
-                if semi >= 0:
-                    return semi
-
+def _nonansi_decl_insert_idx(source, mod_node):
+    """Insert immediately after the last leading body port declaration."""
+    last = None
+    for child in mod_node.children:
+        if child.tag in _HEADER_TAGS or child.tag == "comment":
+            continue
+        if child.tag == "module_item" and _direct(child, {"port_declaration"}):
+            last = child
+        else:
+            break
+    if last is not None:
+        return _byte_to_char_index(source, last.end - 1)
     return _module_offsets(mod_node, source)["decl_insert_idx"]
 
 
@@ -833,7 +650,7 @@ def _apply_ansi_add_port(source: str, close_idx: int, port_spec: dict[str, str])
 
 def _apply_nonansi_add_port(
     source: str,
-    parser: Optional[VeribleParser],
+    parser: Optional[TreeSitterParser],
     module_name: str,
     close_idx: int,
     port_spec: dict[str, str],
@@ -855,57 +672,9 @@ def _apply_nonansi_add_port(
     return _insert_decl_after_index(with_name, after_idx, decl)
 
 
-def _find_matching_paren_from(source: str, open_idx: int) -> int:
-    """Find matching ')' from a known '(' index, skipping string literals and comments."""
-    if open_idx < 0 or open_idx >= len(source) or source[open_idx] != "(":
-        return -1
-    depth = 0
-    i = open_idx
-    in_string = False
-    in_block_comment = False
-    while i < len(source):
-        ch = source[i]
-        if in_block_comment:
-            if ch == "*" and i + 1 < len(source) and source[i + 1] == "/":
-                in_block_comment = False
-                i += 2
-                continue
-        elif in_string:
-            if ch == "\\":
-                i += 2  # skip escaped character
-                continue
-            if ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch == "/" and i + 1 < len(source):
-            if source[i + 1] == "/":
-                end = source.find("\n", i)
-                i = end + 1 if end >= 0 else len(source)
-                continue
-            elif source[i + 1] == "*":
-                in_block_comment = True
-                i += 2
-                continue
-        if not in_block_comment and not in_string:
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    return i
-        i += 1
-    return -1
-
-
-# ---------------------------------------------------------------------------
-# Edit operations
-# ---------------------------------------------------------------------------
-
-
 def add_port(
     source: str,
-    parser: Optional[VeribleParser],
+    parser: Optional[TreeSitterParser],
     module_name: str,
     port_spec: dict[str, str],
     *,
@@ -944,35 +713,20 @@ def add_port(
     return _validate_edit_or_raise(source, edited, parser, "add_port(non-ansi)") if validate else edited
 
 
-_DECL_TAGS = [
-    "kDataDeclaration",
-    "kNetDeclaration",
-    "kVariableDeclarationAssign",
-    "kModulePortDeclaration",
-]
-
-
-def _signal_declared_in_module(mod_node: Any, signal_name: str) -> bool:
-    # Only declarator names count, never identifiers in types, widths or RHSs.
-    declarators = {"kPortDeclaration", "kPort", "kIdentifierUnpackedDimensions",
-                   "kNetVariable", "kNetDeclarationAssignment", "kRegisterVariable",
-                   "kVariableDeclarationAssign"}
-    for node in _module_nodes(mod_node, declarators,
-                              stop_tags={"kGenerateBlock", "kSeqBlock", "kParBlock"}):
-        sid = _find_first_identifier_child(node)
-        if sid is None:
-            for child in getattr(node, "children", ()):
-                if getattr(child, "tag", "") == "kUnqualifiedId":
-                    sid = _find_first_identifier_in_subtree(child)
-                    break
-        if sid is not None and _desc_text(sid) == signal_name:
+def _signal_declared_in_module(mod_node, signal_name):
+    if any(p["name"] == signal_name for p in _extract_ports(mod_node, "", _is_ansi_module(mod_node))):
+        return True
+    for node in _module_nodes(mod_node, {"net_decl_assignment", "variable_decl_assignment"},
+                              stop_tags={"generate_block", "seq_block", "par_block", "sequential_block", "parallel_block"}):
+        name = _field(node, "name") or _find_first_identifier_child(node)
+        if _desc_text(name) == signal_name:
             return True
     return False
 
 
 def add_wire(
     source: str,
-    parser: Optional[VeribleParser],
+    parser: Optional[TreeSitterParser],
     module_name: str,
     wire_spec: dict[str, str],
     *,
@@ -998,53 +752,31 @@ def add_wire(
     return _validate_edit_or_raise(source, edited, parser, f"add_wire '{name}'") if validate else edited
 
 
-def _find_gate_instance_node(mod_node: Any, instname: str, offset: Optional[int] = None) -> Optional[Any]:
-    candidates: list[Any] = []
-    for ginst in _module_nodes(mod_node, {"kGateInstance"}):
-        sid = _find_first_identifier_child(ginst)
-        if sid is None:
-            sid = _find_first_identifier_in_subtree(ginst)
-        if sid and _desc_text(sid) == instname:
-            candidates.append(ginst)
+def _find_gate_instance_node(mod_node, instname, offset=None):
+    for gate in _module_nodes(mod_node, {"hierarchical_instance"}):
+        name = _instance_name(gate)
+        if name and (name.start == offset if offset is not None else _desc_text(name) == instname):
+            return gate
+    return None
 
-    if not candidates:
+
+def _existing_named_port_wire(ginst, port_name, source):
+    connections = _direct(ginst, {"list_of_port_connections"})
+    if connections is None:
         return None
-    if offset is None:
-        return candidates[0]
-
-    def _distance(node: Any) -> int:
-        s, _ = get_node_range(node)
-        return abs(s - offset) if s < INVALID_POSITION else 1_000_000_000
-
-    return min(candidates, key=_distance)
-
-
-def _existing_named_port_wire(ginst: Any, port_name: str, source: str) -> Optional[str]:
-    for ap in ginst.find_all({"tag": "kActualNamedPort"}, iter_=PreOrderTreeIterator):
-        # Find port name from direct child identifier
-        pname_node = _find_first_identifier_child(ap)
-        if pname_node is None:
-            pname_node = _find_first_identifier_in_subtree(ap)
-        pname = _desc_text(pname_node) if pname_node else ""
-
-        if pname != port_name:
+    for ap in connections.children:
+        if ap.tag != "named_port_connection" or _desc_text(_field(ap, "port_name")) != port_name:
             continue
-
-        expr = ap.find({"tag": "kExpression"}, iter_=PreOrderTreeIterator)
-        if not expr:
-            # .name is an implicit connection; .name() is explicitly open.
-            return "" if ap.find({"tag": "("}) is not None else pname
-        es, ee = get_node_range(expr)
-        if es < INVALID_POSITION and ee > es:
+        expr = _field(ap, "connection")
+        if expr is not None:
             return _desc_text(expr)
-        return _desc_text(expr)
-
+        return "" if _direct(ap, {"("}) else port_name
     return None
 
 
 def add_inst_port(
     source: str,
-    parser: Optional[VeribleParser],
+    parser: Optional[TreeSitterParser],
     module_name: str,
     spec: dict[str, str],
     *,
@@ -1058,9 +790,7 @@ def add_inst_port(
 
     if mi is None:
         mi = _get_module_info(source, module_name, parser)
-    inst = next((i for i in mi.get("instances", []) if i.get("name") == instname), None)
-    if inst is None:
-        raise ValueError(f"Instance '{instname}' not found in module '{module_name}'")
+    inst = _select_instance(mi.get("instances", []), instname, module_name)
 
     close_idx = _byte_to_char_index(source, int(inst.get("port_close_idx", -1)))
     if close_idx < 0:
@@ -1069,18 +799,7 @@ def add_inst_port(
     if close_idx < 0:
         raise ValueError(f"Unable to align closing ')' for instance '{instname}'")
 
-    # Derive the instance-local paren range from its own offset.
-    inst_offset = int(inst.get("offset", -1))
-    local_open_idx = -1
-    if inst_offset >= 0:
-        local_open_idx = source.find("(", _byte_to_char_index(source, inst_offset), close_idx + 1)
-        if local_open_idx >= 0:
-            local_close = _find_matching_paren_from(source, local_open_idx)
-            if local_close >= 0:
-                close_idx = local_close
-
-    if local_open_idx < 0:
-        local_open_idx = source.rfind("(", 0, close_idx)
+    inst_offset = inst["offset"]
 
     ginst = _find_gate_instance_node(mi["cst"], instname, inst_offset if inst_offset >= 0 else None)
     if ginst is not None:
@@ -1105,21 +824,27 @@ def add_inst_port(
 
 
 def gen_sig_decl(module_info: dict) -> str:
-    """Generate signal declarations for all ports of a module.
-
-    inout  → wire
-    others → logic
-    One declaration per line; columns aligned; direction comment at end.
-    """
+    """Generate declarations preserving port types, dimensions and imports."""
     ports = module_info.get("ports", [])
     valid_ports = [p for p in ports if p.get("name", "").strip()]
     if not valid_ports:
         return ""
 
-    rows = []
+    rows, interface_lines = [], []
     for p in valid_ports:
+        if p.get("interface"):
+            name, dimension = p["name"].strip(), p.get("dimension", "").strip()
+            if p.get("interface_type"):
+                name_part = f"{name} {dimension}" if dimension else name
+                interface_lines.append(f"{p['interface_type']} {name_part} (); // interface {p.get('modport', '')}".rstrip())
+            else:
+                interface_lines.append(f"// Connect {name} to an existing interface instance ({p.get('type', 'interface')}).")
+            continue
         direction = p.get("direction", "").strip().lower()
-        sig_type  = "wire" if direction == "inout" else "logic"
+        sig_type = p.get("type", "").strip()
+        if not sig_type or sig_type in {"signed", "unsigned"}:
+            base = "wire" if direction == "inout" else "logic"
+            sig_type = " ".join(filter(None, (base, sig_type)))
         width     = p.get("width", "").strip()
         name      = p.get("name", "").strip()
         dimension = p.get("dimension", "").strip()
@@ -1127,9 +852,9 @@ def gen_sig_decl(module_info: dict) -> str:
         name_part = f"{name} {dimension}" if dimension else name
         rows.append((sig_type, width, name_part, direction))
 
-    max_type  = max(len(r[0]) for r in rows)
-    max_width = max(len(r[1]) for r in rows)
-    max_name  = max(len(r[2]) for r in rows)
+    max_type  = max((len(r[0]) for r in rows), default=0)
+    max_width = max((len(r[1]) for r in rows), default=0)
+    max_name  = max((len(r[2]) for r in rows), default=0)
 
     lines = []
     for sig_type, width, name_part, direction in rows:
@@ -1141,7 +866,9 @@ def gen_sig_decl(module_info: dict) -> str:
             line = f"{sig_type:<{max_type}} {decl:<{max_name + 1}} {comment}"
         lines.append(line.rstrip())
 
-    return "\n".join(lines)
+    lines.extend(interface_lines)
+    imports = module_info.get("imports", [])
+    return "\n".join([*imports, "", *lines] if imports else lines)
 
 
 def gen_inst(
@@ -1201,12 +928,12 @@ def gen_inst(
 
 
 class vedit:
-    """Module editor using verible-verilog-syntax as parsing backend."""
+    """Module editor using the Tree-sitter SystemVerilog grammar."""
 
     def __init__(self, source: str, module_name: str) -> None:
         self._source = source
         self._module_name = module_name
-        self._parser: VeribleParser = _new_parser()   # shared, stateless — reuse across calls
+        self._parser: TreeSitterParser = _new_parser()   # shared, stateless — reuse across calls
         self._mi_cache: Optional[dict] = None         # invalidated whenever _source changes
         self._instances_cached = False
 
@@ -1243,7 +970,7 @@ class vedit:
         fpath = Path(path)
         if not fpath.exists():
             raise FileNotFoundError(f"file not found: {fpath}")
-        source = fpath.read_text(encoding="utf-8")
+        source = fpath.read_bytes().decode("utf-8")
         if module_name is None:
             mods = _analyze_modules(source, _new_parser(), include_instances=False)
             if not mods:
@@ -1256,7 +983,7 @@ class vedit:
             if auto_select and inst_name and len(mods) > 1:
                 for mod in mods:
                     mod["instances"] = _extract_instances(mod["cst"])
-                    if any(i["name"] == inst_name for i in mod["instances"]):
+                    if any(i["name"] == inst_name or i.get("path") == inst_name for i in mod["instances"]):
                         selected = mod
                         instances_cached = True
                         break
@@ -1269,7 +996,7 @@ class vedit:
 
     @classmethod
     def list_modules_in_file(cls, path: Union[Path, str]) -> list[str]:
-        source_text = Path(path).read_text(encoding="utf-8")
+        source_text = Path(path).read_bytes().decode("utf-8")
         return [m["name"] for m in _analyze_modules(source_text, _new_parser(), include_instances=False)]
 
     @classmethod
@@ -1289,8 +1016,7 @@ class vedit:
     @property
     def parameter_declaration(self) -> str:
         """Complete header #(parameters), preserving defaults and types."""
-        header = self._mi()["cst"].find({"tag": "kModuleHeader"}, iter_=PreOrderTreeIterator)
-        params = header.find({"tag": "kFormalParameterListDeclaration"}, iter_=PreOrderTreeIterator) if header else None
+        params = _direct(_header(self._mi()["cst"]), {"parameter_port_list"})
         return _desc_text(params) if params else ""
 
     # ── Edit methods ────────────────────────────────────────────────────────
@@ -1450,18 +1176,9 @@ class vedit:
         try:
             mi = self._mi(True)
             edits = []
-            instances_by_name = {i["name"]: i for i in reversed(mi.get("instances", []))}
-            gates_by_name = {}
-            for gate in _module_nodes(mi["cst"], {"kGateInstance"}):
-                sid = _find_first_identifier_child(gate) or _find_first_identifier_in_subtree(gate)
-                if sid:
-                    gates_by_name.setdefault(_desc_text(sid), []).append(gate)
             for instname, ports in inst_port_dict.items():
-                inst = instances_by_name.get(instname)
-                if inst is None:
-                    raise ValueError(f"Instance '{instname}' not found in module '{self._module_name}'")
-                candidates = gates_by_name.get(instname, [])
-                ginst = min(candidates, key=lambda g: abs(get_node_range(g)[0] - inst["offset"])) if candidates else None
+                inst = _select_instance(mi.get("instances", []), instname, self._module_name)
+                ginst = _find_gate_instance_node(mi["cst"], inst["name"], inst["offset"])
                 close_idx = _align_to_char(original_source, _byte_to_char_index(original_source, inst["port_close_idx"]), ")")
                 if close_idx < 0:
                     raise ValueError(f"Cannot locate closing ')' for instance '{instname}'")

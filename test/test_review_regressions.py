@@ -9,8 +9,8 @@ from vutils.vedit import add_inst_port, add_port, add_wire
 
 class ReviewRegressionTests(unittest.TestCase):
     def assert_valid(self, editor):
-        from vutils.vparser import VeribleParser
-        self.assertFalse(VeribleParser().parse_string(editor.module_text, {"gen_tree": False}).errors)
+        from vutils.vparser import TreeSitterParser
+        self.assertFalse(TreeSitterParser().parse_string(editor.module_text, {"gen_tree": False}).errors)
 
     def test_unicode_combined_edit_and_idempotence(self):
         for source in (

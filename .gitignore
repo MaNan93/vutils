@@ -27,3 +27,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Generated corpus validation reports
+/artifacts/

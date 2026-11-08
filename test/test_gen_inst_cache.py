@@ -1,7 +1,7 @@
 """Template generation must share the editor's source-version cache."""
 
 import importlib
-import subprocess
+from vutils.vparser import _parse_source
 import unittest
 from unittest.mock import patch
 
@@ -14,7 +14,7 @@ SOURCE = "module top #(parameter W=8)(input clk, input [W-1:0] a); sub u0(.clk(c
 class InstantiationCacheTests(unittest.TestCase):
     def test_template_and_metadata_reads_share_one_parse(self):
         editor = vedit(SOURCE, "top")
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run, \
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run, \
              patch("vutils.vedit._extract_instances", wraps=edit_module._extract_instances) as extract:
             template = editor.gen_inst(instance_name="u_top", port_map={"a": "payload"})
             self.assertIn("top #(", template)
@@ -35,7 +35,7 @@ class InstantiationCacheTests(unittest.TestCase):
         editor = vedit(SOURCE, "top")
         before = editor.gen_inst()
         editor.add_port({"rst_n": {"direction": "input"}})
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
             after = editor.gen_inst()
             self.assertIn(".rst_n(rst_n)", after)
             self.assertNotIn("rst_n", before)
@@ -46,7 +46,7 @@ class InstantiationCacheTests(unittest.TestCase):
     def test_nonansi_named_module_in_multi_module_source(self):
         source = "module other(input wrong); endmodule\nmodule top(a); input [7:0] a; endmodule"
         editor = vedit(source, "top")
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
             template = editor.gen_inst(instance_name="u_selected")
             self.assertTrue(template.startswith("top u_selected ("))
             self.assertRegex(template, r"\.a\s*\(a\s*\)")

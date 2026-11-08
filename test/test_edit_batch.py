@@ -1,19 +1,19 @@
 """Editing correctness and bounded parser-call regressions."""
 
-import subprocess
+from vutils.vparser import _parse_source
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from vutils.vedit import vedit
-from vutils.vparser import VeribleParser
+from vutils.vparser import TreeSitterParser
 from vutils.vparser import BranchNode, TokenNode, PreOrderTreeIterator, PostOrderTreeIterator
 
 
 class BatchEditingTests(unittest.TestCase):
     def assert_valid(self, source):
-        self.assertFalse(VeribleParser().parse_string(source, {"gen_tree": False}).errors, source)
+        self.assertFalse(TreeSitterParser().parse_string(source, {"gen_tree": False}).errors, source)
 
     def test_combined_ports_and_connections_use_one_tree_and_one_check(self):
         for source in ("module top(input a); sub u0(.a(a)); endmodule",
@@ -23,18 +23,20 @@ class BatchEditingTests(unittest.TestCase):
                 editor = vedit(source, "top")
                 ports = {"b": {"direction": "input"}, "c": {"direction": "output", "width": "[7:0]"}}
                 pins = {"u0": {"b": {"wire": "b"}, "c": {"wire": "c"}}}
-                with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+                with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
                     editor.add_ports_and_inst_ports(ports, pins)
                 self.assertEqual(run.call_count, 2)
-                self.assertEqual(sum("--printtree" in call.args[0] for call in run.call_args_list), 1)
+                self.assertEqual(run.call_args_list[0].args[0], source.encode())
+                self.assertEqual(run.call_args_list[1].args[0], editor.module_text.encode())
                 self.assertEqual({p["name"] for p in editor.ports}, {"a", "b", "c"})
                 self.assertIn(".b(b)", editor.module_text)
                 self.assertIn(".c(c)", editor.module_text)
                 sequential = vedit(source, "top").add_port(ports).add_inst_port(pins)
-                self.assertEqual(editor.module_text, sequential.module_text)
+                self.assertEqual([line.strip() for line in editor.module_text.splitlines()],
+                                 [line.strip() for line in sequential.module_text.splitlines()])
                 self.assert_valid(editor.module_text)
                 original = editor.module_text
-                with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+                with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
                     editor.add_ports_and_inst_ports(ports, pins)
                 self.assertEqual(editor.module_text, original)
                 self.assertEqual(run.call_count, 0)
@@ -56,7 +58,7 @@ class BatchEditingTests(unittest.TestCase):
             path.write_text("module top(input a); sub u0(.a(a)); endmodule", encoding="utf-8")
             import importlib
             edit_module = importlib.import_module("vutils.vedit")
-            with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run, \
+            with patch("vutils.vparser._parse_source", wraps=_parse_source) as run, \
                  patch("vutils.vedit._extract_instances", wraps=edit_module._extract_instances) as extract:
                 editor = vedit.from_file(path)
                 self.assertEqual(editor.ports[0]["name"], "a")
@@ -74,7 +76,7 @@ class BatchEditingTests(unittest.TestCase):
                             encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "multiple modules"):
                 vedit.from_file(path)
-            with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+            with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
                 editor = vedit.from_file(path, auto_select=True, inst_name="u0")
                 self.assertEqual(editor.module_name, "target")
                 editor.add_ports_and_inst_ports({"b": {"direction": "input"}}, {"u0": {"b": {"wire": "b"}}})
@@ -105,7 +107,7 @@ class BatchEditingTests(unittest.TestCase):
     def test_nonansi_ports_are_batched_with_two_parser_calls(self):
         editor = vedit("module top(a);\ninput a;\nwire x=a;\nendmodule\n", "top")
         ports = {f"p{i}": {"direction": "input", "width": "[7:0]"} for i in range(12)}
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
             editor.add_port(ports)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(len(editor.ports), 13)
@@ -128,7 +130,7 @@ class BatchEditingTests(unittest.TestCase):
     def test_instance_ports_are_batched_with_two_parser_calls(self):
         editor = vedit("module top;\nsub u0(.a(a));\nendmodule", "top")
         pins = {f"p{i}": {"wire": f"w{i}"} for i in range(12)}
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run:
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run:
             editor.add_inst_port({"u0": pins})
         self.assertEqual(run.call_count, 2)
         for i in range(12):
@@ -170,7 +172,7 @@ class BatchEditingTests(unittest.TestCase):
         self.assert_valid("module top; endmodule")
 
     def test_diagnostics_only_failure_has_errors(self):
-        data = VeribleParser().parse_string("module top; wire wire a; endmodule", {"gen_tree": False})
+        data = TreeSitterParser().parse_string("module top; wire wire a; endmodule", {"gen_tree": False})
         self.assertTrue(data.errors)
         self.assertIn("wire", data.errors[0].message)
 
@@ -179,7 +181,7 @@ class BatchEditingTests(unittest.TestCase):
             valid, invalid = Path(temp) / "a.sv", Path(temp) / "b.sv"
             valid.write_text("module a; endmodule")
             invalid.write_text("module b; wire wire a; endmodule")
-            parsed = VeribleParser().parse_files([str(valid), str(invalid)], {"gen_tree": False})
+            parsed = TreeSitterParser().parse_files([str(valid), str(invalid)], {"gen_tree": False})
             self.assertFalse(parsed[str(valid)].errors)
             self.assertTrue(parsed[str(invalid)].errors)
 

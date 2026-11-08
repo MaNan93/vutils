@@ -1,90 +1,45 @@
-#!/usr/bin/env python3
-"""Unit tests for vutils.vparser official-style parse API."""
-
-import json
+"""Native parsing, diagnostics, original byte offsets, and compatibility imports."""
+import tempfile
 import unittest
-from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
-from vutils.vparser import ParseError, VeribleParser
+from vutils.vparser import ParseError, TreeSitterParser, VeribleParser
 
 
-class VeribleParserApiTests(unittest.TestCase):
-    def _mock_result(self, payload: dict) -> SimpleNamespace:
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+class TreeSitterParserApiTests(unittest.TestCase):
+    def test_native_parse_does_not_launch_an_executable(self):
+        with patch('subprocess.run', side_effect=AssertionError('external process')):
+            data = TreeSitterParser().parse_string('// 中文\nmodule top(input a); endmodule',
+                                                   {'gen_tokens': True, 'gen_rawtokens': True})
+        self.assertFalse(data.errors)
+        self.assertEqual(data.tree.tag, 'source_file')
+        self.assertTrue(data.tree.find({'tag': 'module_declaration'}))
+        self.assertNotIn('one_line_comment', [t.tag for t in data.tokens])
+        self.assertIn('one_line_comment', [t.tag for t in data.rawtokens])
+        self.assertEqual([t.text for t in data.tokens if t.tag == 'simple_identifier'], ['top', 'a'])
+        self.assertEqual(data.source_code, '// 中文\nmodule top(input a); endmodule'.encode())
 
-    @patch("vutils.vparser.subprocess.run")
-    def test_parse_string_with_options(self, run_mock):
-        run_mock.return_value = self._mock_result({
-            "-": {
-                "tree": {
-                    "tag": "kSource",
-                    "children": [None, {"tag": "module", "start": 0, "end": 6}],
-                },
-                "tokens": [{"tag": "SymbolIdentifier", "start": 7, "end": 8}],
-                "rawtokens": [{"tag": "SymbolIdentifier", "start": 7, "end": 8}],
-                "errors": [{"line": 1, "column": 1, "phase": "parse", "message": "x"}],
-            }
-        })
+    def test_parse_files_diagnostics_are_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp)/'a.sv', Path(tmp)/'b.sv'
+            a.write_text('module a; endmodule')
+            b.write_text('module b; assign = ; endmodule')
+            out = TreeSitterParser().parse_files([str(a), str(b)], {'gen_tree': False})
+        self.assertIsNone(out[str(a)].tree)
+        self.assertFalse(out[str(a)].errors)
+        self.assertTrue(out[str(b)].errors)
+        self.assertIsInstance(out[str(b)].errors[0], ParseError)
 
-        parser = VeribleParser(executable="verible-verilog-syntax")
-        data = parser.parse_string(
-            "module X(); endmodule;",
-            options={"gen_tokens": True, "gen_rawtokens": True, "skip_null": True},
-        )
+    def test_missing_tokens_are_errors(self):
+        data = TreeSitterParser().parse_string('module top(input a);', {'gen_tree': False})
+        self.assertTrue(data.errors)
+        self.assertTrue(any('missing' in e.message for e in data.errors))
 
-        self.assertIsNotNone(data)
-        self.assertIsNotNone(data.tree)
-        self.assertEqual(data.tree.get("tag"), "kSource")
-        self.assertEqual(len(data.tree.get("children", [])), 1)
-        self.assertIsNotNone(data.tokens)
-        self.assertEqual(data.tokens[0]["tag"], "SymbolIdentifier")
-        self.assertIsNotNone(data.rawtokens)
-        self.assertEqual(data.rawtokens[0]["tag"], "SymbolIdentifier")
-        self.assertIsNotNone(data.errors)
-        self.assertIsInstance(data.errors[0], ParseError)
-        self.assertEqual(data.errors[0].message, "x")
-        self.assertEqual(data.source_code, b"module X(); endmodule;")
-
-        call_args = run_mock.call_args.args[0]
-        self.assertIn("--export_json", call_args)
-        self.assertIn("--printtree", call_args)
-        self.assertIn("--printtokens", call_args)
-        self.assertIn("--printrawtokens", call_args)
-
-    @patch("vutils.vparser.subprocess.run")
-    def test_parse_files_returns_mapping(self, run_mock):
-        run_mock.return_value = self._mock_result({
-            "a.sv": {
-                "tree": {"tag": "kSource", "children": []},
-                "errors": [],
-            },
-            "b.sv": {
-                "tree": {"tag": "kSource", "children": []},
-                "errors": [],
-            },
-        })
-
-        parser = VeribleParser(executable="verible-verilog-syntax")
-        out = parser.parse_files(["a.sv", "b.sv"])
-
-        self.assertIn("a.sv", out)
-        self.assertIn("b.sv", out)
-        self.assertEqual(out["a.sv"].tree["tag"], "kSource")
-
-    @patch("vutils.vparser.subprocess.run")
-    def test_legacy_tree_property_compatible(self, run_mock):
-        run_mock.return_value = self._mock_result({
-            "-": {
-                "tree": {"tag": "kSource", "children": []},
-                "errors": [],
-            }
-        })
-
-        parser = VeribleParser(source="module X(); endmodule;", executable="verible-verilog-syntax")
-        self.assertEqual(parser.tree.get("tag"), "kSource")
-        self.assertEqual(parser.data.get("tree", {}).get("tag"), "kSource")
+    def test_old_import_name_uses_tree_sitter(self):
+        self.assertIs(VeribleParser, TreeSitterParser)
+        self.assertFalse(VeribleParser(executable='/does/not/exist').parse_string('module x; endmodule').errors)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+if __name__ == '__main__':
+    unittest.main()

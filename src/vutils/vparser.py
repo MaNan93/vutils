@@ -1,22 +1,16 @@
-"""Official-style wrapper for verible-verilog-syntax JSON output.
-
-This module focuses on parser data access patterns similar to Verible's
-Python examples:
-- parse_string / parse_file / parse_files
-- syntax tree navigation via Node APIs
-- optional token and raw token export
-"""
+"""In-process Tree-sitter SystemVerilog parsing and CST navigation."""
 
 from __future__ import annotations
 
 import collections
-import json
-import os
-import shutil
-import subprocess
+from bisect import bisect_left
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, TypedDict, Union
+
+from tree_sitter import Language, Parser, Query, QueryCursor
+import tree_sitter_systemverilog
 
 
 COMMON_TYPES = frozenset({
@@ -46,6 +40,9 @@ class PortInfo(TypedDict, total=False):
     type: str
     width: str
     dimension: str
+    interface: bool
+    interface_type: str
+    modport: str
 
 
 class InstanceInfo(TypedDict, total=False):
@@ -54,6 +51,7 @@ class InstanceInfo(TypedDict, total=False):
     type: str
     offset: int
     port_close_idx: int
+    path: str
 
 
 class ModuleInfo(TypedDict, total=False):
@@ -64,52 +62,7 @@ class ModuleInfo(TypedDict, total=False):
     ports: list[PortInfo]
     param_names: list[str]
     instances: list[InstanceInfo]
-
-
-def _find_verible_binary() -> str:
-    """Locate verible-verilog-syntax binary.
-
-    Search order:
-    1) VERIBLE_BIN (path to file or containing directory)
-    2) nearby native Windows executable (avoids a PATH shell wrapper)
-    3) PATH
-    4) nearby 'verible' or 'misc/verible' directory
-    """
-    name = "verible-verilog-syntax"
-    if env := os.environ.get("VERIBLE_BIN", ""):
-        p = Path(env)
-        if p.is_file():
-            return str(p)
-        for ext in ("", ".exe"):
-            candidate = p / (name + ext)
-            if candidate.is_file():
-                return str(candidate)
-
-    # A native local executable avoids a PATH .BAT/.CMD shell hop per parse.
-    here = Path(__file__).resolve().parent
-    for _ in range(6):
-        for directory in (here / "verible", here / "misc" / "verible"):
-            candidate = directory / (name + ".exe")
-            if candidate.is_file():
-                return str(candidate)
-        here = here.parent
-
-    if found := shutil.which(name):
-        return found
-
-    here = Path(__file__).resolve().parent
-    for _ in range(6):
-        for directory in (here / "verible", here / "misc" / "verible"):
-            for ext in ("", ".exe"):
-                candidate = directory / (name + ext)
-                if candidate.is_file():
-                    return str(candidate)
-        here = here.parent
-
-    return name
-
-
-VERIBLE = _find_verible_binary()
+    imports: list[str]
 
 
 CallableFilter = Callable[["Node"], bool]
@@ -192,6 +145,8 @@ class Node:
     def syntax_data(self) -> Optional["SyntaxData"]:
         p = self.parent
         while p is not None and not isinstance(p, RootNode):
+            if hasattr(p, "_data"):
+                return p._data
             p = p.parent
         return p.syntax_data if isinstance(p, RootNode) else None
 
@@ -387,266 +342,219 @@ class ParseError:
 @dataclass
 class SyntaxData:
     source_code: Optional[bytes] = None
-    tree: Optional[RootNode] = None
+    tree: Optional[BranchNode] = None
     tokens: Optional[list[Token]] = None
     rawtokens: Optional[list[Token]] = None
     errors: Optional[list[ParseError]] = None
+    inserted_bytes: tuple[int, ...] = ()
 
 
-def _remove_null_children(tree: Any) -> Any:
-    if isinstance(tree, list):
-        return [_remove_null_children(t) for t in tree if t is not None]
-    if isinstance(tree, dict):
-        out: dict[str, Any] = {}
-        for k, v in tree.items():
-            if k == "children" and isinstance(v, list):
-                out[k] = [_remove_null_children(t) for t in v if t is not None]
-            else:
-                out[k] = _remove_null_children(v)
-        return out
-    return tree
+_LANGUAGE = Language(tree_sitter_systemverilog.language())
+_MODULE_QUERY = Query(_LANGUAGE, "(module_declaration) @module")
 
 
-class VeribleVerilogSyntax:
-    """Wrapper around verible-verilog-syntax --export_json."""
+def module_nodes(tree):
+    """Capture module definitions without materializing their body wrappers."""
+    nodes = QueryCursor(_MODULE_QUERY).captures(tree.native).get("module", [])
+    return [SyntaxNode(node, tree.syntax_data, tree) for node in sorted(nodes, key=lambda n: n.start_byte)]
 
-    def __init__(self, executable: str = VERIBLE):
-        self.executable = executable
+# A parsing view, never the text written back to disk. Replace the backtick of
+# opaque macro identifiers with an identifier character; hide conditional
+# directive lines so list entries remain visible in the concrete syntax tree.
+# Every replacement preserves byte length and newlines. This does not expand
+# macros, choose branches, resolve includes, or perform elaboration.
+_SOURCE_PART = re.compile(
+    rb'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\[\s\S]|[^"\\])*"|\\[^\s]+'
+    rb'|`(?:define|include|undef|timescale|default_nettype|resetall|celldefine|endcelldefine|'
+    rb'begin_keywords|end_keywords|unconnected_drive|nounconnected_drive|line|pragma)\b'
+    rb'(?:[^\n]*\\\r?\n)*[^\n]*'
+    rb'|`(?:ifdef|ifndef|elsif|else|endif)\b[^\r\n]*'
+    rb'|`[A-Za-z_][A-Za-z0-9_$]*')
+_CONDITIONAL = re.compile(rb'`(?:ifdef|ifndef|elsif|else|endif)\b')
+_MACRO_APOSTROPHE = re.compile(rb"\s*'")
+_MACRO_TYPE = re.compile(rb"\s*#\s*\(|\s+[A-Za-z_][A-Za-z0-9_$]*\s*(?:[(),;\[])")
 
-    @staticmethod
-    def _options(user_options: Optional[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "gen_tree": True,
-            "skip_null": False,
-            "gen_tokens": False,
-            "gen_rawtokens": False,
-            **(user_options or {}),
-        }
 
-    def _build_args(self, options: dict[str, Any], paths: list[str]) -> list[str]:
-        args = [self.executable, "--export_json"]
-        if options["gen_tree"]:
-            args.append("--printtree")
-        if options["gen_tokens"]:
-            args.append("--printtokens")
-        if options["gen_rawtokens"]:
-            args.append("--printrawtokens")
-        args.extend(paths)
-        return args
+def _parsing_view(source: bytes) -> bytes:
+    def replace(match):
+        token = match.group()
+        if _CONDITIONAL.match(token):
+            return bytes(c if c in (10, 13) else 32 for c in token)
+        if token.startswith(b'`') and not re.match(
+            rb'`(?:define|include|undef|timescale|default_nettype|resetall|celldefine|endcelldefine|'
+            rb'begin_keywords|end_keywords|unconnected_drive|nounconnected_drive|line|pragma)\b', token
+        ):
+            # The grammar accepts standalone macro statements and expressions.
+            # Only identifier-shaped type / module references need adaptation.
+            preceding = match.start() - 1
+            while preceding >= 0 and source[preceding] in b" \t\r\n":
+                preceding -= 1
+            if (preceding >= 0 and source[preceding] in b"#|&~^[") or _MACRO_APOSTROPHE.match(source, match.end()):
+                return b'_' + token[1:]
+            if _MACRO_TYPE.match(source, match.end()):
+                return b'_' + token[1:]
+            return token
+        return token
+    return _SOURCE_PART.sub(replace, source)
 
-    @staticmethod
-    def _transform_tree(tree_json: Any, data: SyntaxData, skip_null: bool) -> Optional[RootNode]:
-        if not isinstance(tree_json, dict) or "children" not in tree_json:
+
+_CAST_TOKEN = re.compile(
+    rb'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\[\s\S]|[^"\\])*"|\\[^\s]+'
+    rb'|\$[A-Za-z_][A-Za-z0-9_$]*|[()]|[^\s]')
+
+
+_CAST_FOLLOW = re.compile(rb"\s*'\s*\(")
+
+
+def _parenthesize_system_casts(source):
+    """Work around the grammar's rejection of $bits(x)'(...) sized casts.
+
+    Parenthesizing the size expression is semantically neutral. Keep a sparse
+    map for the added bytes, so edits and diagnostics still use original offsets.
+    No expression is replaced or discarded, including the argument expressions.
+    """
+    stack, insertions = [], []
+    previous = None
+    for token in _CAST_TOKEN.finditer(source):
+        text = token.group()
+        if text.startswith((b"//", b"/*")):
+            continue
+        if text == b"(":
+            stack.append(previous if previous and previous.group().startswith(b"$") else None)
+        elif text == b")" and stack:
+            function = stack.pop()
+            if function is not None and _CAST_FOLLOW.match(source, token.end()):
+                insertions.extend(((function.start(), b"("), (token.end(), b")")))
+        previous = token
+    if not insertions:
+        return source, ()
+    parts, mapped, cursor = [], [], 0
+    for idx, (offset, char) in enumerate(sorted(insertions)):
+        parts.extend((source[cursor:offset], char))
+        mapped.append(offset + idx)
+        cursor = offset
+    parts.append(source[cursor:])
+    return b"".join(parts), tuple(mapped)
+
+
+def _original_offset(data, position):
+    return position - bisect_left(data.inserted_bytes, position)
+
+
+def _parse_source(source: bytes):
+    """One in-process native parse (also the instrumentation point for tests)."""
+    view, inserted = _parenthesize_system_casts(_parsing_view(source))
+    return Parser(_LANGUAGE).parse(view), inserted
+
+
+class SyntaxNode(BranchNode):
+    """Lazy Tree-sitter node adapter with original-text byte ranges.
+
+    ``tag`` is the native grammar node type. Child wrappers are built only on
+    access, so interface reads do not allocate Python objects for module bodies.
+    ``native`` exposes the underlying tree-sitter Node, including field access.
+    """
+
+    def __init__(self, native, data, parent=None):
+        Node.__init__(self, parent)
+        self.native = native
+        self.tag = native.type
+        self._data = data
+        self._children = None
+
+    @property
+    def syntax_data(self):
+        return self._data
+
+    @property
+    def start(self):
+        return _original_offset(self._data, self.native.start_byte)
+
+    @property
+    def end(self):
+        return _original_offset(self._data, self.native.end_byte)
+
+    @property
+    def children(self):
+        if self._children is None:
+            self._children = [_wrap_node(child, self._data, self) for child in self.native.children]
+        return self._children
+
+    def field(self, name):
+        native = self.native.child_by_field_name(name)
+        if native is None:
             return None
-
-        # make_node already ignores nulls; a recursive JSON copy is redundant.
-        tree = tree_json
-
-        def make_node(node_json: Any, parent: Optional[Node] = None) -> Optional[Node]:
-            if node_json is None:
-                return None
-            if not isinstance(node_json, dict):
-                return None
-
-            if "children" in node_json:
-                branch = BranchNode(tag=str(node_json.get("tag", "")), parent=parent, children=[])
-                for child_json in node_json.get("children", []):
-                    child = make_node(child_json, parent=branch)
-                    if child is not None:
-                        branch.children.append(child)
-                return branch
-
-            if "start" in node_json and "end" in node_json:
-                return TokenNode(
-                    tag=str(node_json.get("tag", "")),
-                    start=int(node_json["start"]),
-                    end=int(node_json["end"]),
-                    parent=parent,
-                )
-
-            return None
-
-        root = RootNode(tag=str(tree.get("tag", "")), syntax_data=data, children=[])
-        for child_json in tree.get("children", []):
-            child = make_node(child_json, parent=root)
-            if child is not None:
-                root.children.append(child)
-        return root
-
-    @staticmethod
-    def _transform_interface_tree(tree_json: Any, data: SyntaxData, skip_null: bool) -> Optional[RootNode]:
-        """Build a private, incomplete CST for interface extraction only.
-
-        Keep full module headers and non-ANSI body port declarations, together
-        with their ancestor paths. Retaining paths preserves module nesting and
-        declaration order. The original JSON is never modified. Diagnostics
-        still come from Verible's parse of the complete source.
-        """
-        if not isinstance(tree_json, dict) or "children" not in tree_json:
-            return None
-
-        retained_tags = {"kModuleHeader", "kModulePortDeclaration"}
-
-        def retain(node: dict[str, Any]) -> Optional[dict[str, Any]]:
-            if node.get("tag") in retained_tags:
-                return node
-            children = []
-            for child in node.get("children", []):
-                # Ordinary body tokens cannot contain an interface declaration.
-                if isinstance(child, dict) and "children" in child:
-                    kept = retain(child)
-                    if kept is not None:
-                        children.append(kept)
-            if children:
-                return {"tag": node.get("tag", ""), "children": children}
-            return None
-
-        tree = retain(tree_json) or {"tag": tree_json.get("tag", ""), "children": []}
-        return VeribleVerilogSyntax._transform_tree(tree, data, skip_null)
-
-    @staticmethod
-    def _transform_tokens(tokens_json: Any, data: SyntaxData) -> list[Token]:
-        if not isinstance(tokens_json, list):
-            return []
-        out: list[Token] = []
-        for t in tokens_json:
-            if not isinstance(t, dict):
-                continue
-            if "tag" not in t or "start" not in t or "end" not in t:
-                continue
-            out.append(Token(str(t["tag"]), int(t["start"]), int(t["end"]), data))
-        return out
-
-    @staticmethod
-    def _transform_errors(errors_json: Any) -> list[ParseError]:
-        if not isinstance(errors_json, list):
-            return []
-        out: list[ParseError] = []
-        for e in errors_json:
-            if not isinstance(e, dict):
-                continue
-            out.append(
-                ParseError(
-                    line=int(e.get("line", 0) or 0),
-                    column=int(e.get("column", 0) or 0),
-                    phase=str(e.get("phase", "") or ""),
-                    message=str(e.get("message") or (
-                        f"offending token {e['text']!r}" if "text" in e else ""
-                    )),
-                )
-            )
-        return out
-
-    def _load_source_bytes(self, file_key: str, stdin_input: Optional[str]) -> Optional[bytes]:
-        if file_key == "-":
-            return stdin_input.encode("utf-8") if stdin_input is not None else None
-        try:
-            return Path(file_key).read_bytes()
-        except OSError:
-            return None
-
-    def _parse(
-        self,
-        paths: list[str],
-        *,
-        input_: Optional[str] = None,
-        options: Optional[dict[str, Any]] = None,
-    ) -> dict[str, SyntaxData]:
-        opts = self._options(options)
-        args = self._build_args(opts, paths)
-        input_bytes = input_.encode("utf-8") if input_ is not None else None
-        proc = subprocess.run(
-            args,
-            input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-            check=False,
-        )
-
-        # Decode output with proper error handling for diagnostics
-        try:
-            stdout_text = (proc.stdout or b"").decode("utf-8")
-        except UnicodeDecodeError as e:
-            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
-            raise ValueError(
-                f"Verible output contains invalid UTF-8 at byte {e.start}: {e.reason}\n"
-                f"stderr: {stderr_text}\n"
-                f"binary: {self.executable}"
-            )
-
-        try:
-            stderr_text = (proc.stderr or b"").decode("utf-8")
-        except UnicodeDecodeError:
-            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
-
-        if not stdout_text.strip():
-            hint = stderr_text.strip() or "(no stderr)"
-            raise ValueError(
-                f"Verible produced no output (exit code {proc.returncode}).\n"
-                f"stderr: {hint}\n"
-                f"binary: {self.executable}"
-            )
-
-        try:
-            json_data = json.loads(stdout_text)
-        except json.JSONDecodeError as e:
-            msg = stderr_text.strip() or stdout_text[:200]
-            raise ValueError(
-                f"Verible produced invalid JSON: {e.msg} at line {e.lineno}, column {e.colno}\n"
-                f"diagnostic: {msg}"
-            )
-
-        if not isinstance(json_data, dict):
-            raise ValueError(
-                f"Verible produced unexpected JSON structure: expected dict, got {type(json_data).__name__}"
-            )
-
-        results: dict[str, SyntaxData] = {}
-        for file_key, payload in json_data.items():
-            data = SyntaxData(source_code=self._load_source_bytes(file_key, input_))
-            if isinstance(payload, dict):
-                if opts["gen_tree"]:
-                    data.tree = self._transform_tree(payload.get("tree"), data, opts["skip_null"])
-                if opts["gen_tokens"]:
-                    data.tokens = self._transform_tokens(payload.get("tokens"), data)
-                if opts["gen_rawtokens"]:
-                    data.rawtokens = self._transform_tokens(payload.get("rawtokens"), data)
-                data.errors = self._transform_errors(payload.get("errors", []))
-            else:
-                # A successful diagnostics-only file has a null payload even
-                # when a different file in the batch makes the process exit 1.
-                data.errors = [] if payload is None else [
-                    ParseError(line=0, column=0, phase="parse", message="unexpected result")
-                ]
-            results[str(file_key)] = data
-
-        return results
-
-    def parse_files(
-        self,
-        paths: list[str],
-        options: Optional[dict[str, Any]] = None,
-    ) -> dict[str, SyntaxData]:
-        return self._parse(paths, options=options)
-
-    def parse_file(
-        self,
-        path: str,
-        options: Optional[dict[str, Any]] = None,
-    ) -> Optional[SyntaxData]:
-        return self._parse([path], options=options).get(path)
-
-    def parse_string(
-        self,
-        string: str,
-        options: Optional[dict[str, Any]] = None,
-    ) -> Optional[SyntaxData]:
-        return self._parse(["-"], input_=string, options=options).get("-")
+        return next((child for child in self.children if child.native == native), None)
 
 
-class VeribleParser(VeribleVerilogSyntax):
-    """Alias kept for local naming convenience in this repository."""
+def _wrap_node(native, data, parent=None):
+    if native.child_count:
+        return SyntaxNode(native, data, parent)
+    token = TokenNode(native.type, _original_offset(data, native.start_byte),
+                      _original_offset(data, native.end_byte), parent)
+    token.native = native
+    return token
+
+
+class TreeSitterParser:
+    """SystemVerilog CST parser; no external executable is needed.
+
+    Errors and missing tokens are always collected, including diagnostics-only
+    calls. Recovery trees are available to callers but editors reject errors.
+    Offsets are UTF-8 byte offsets into the original, unmodified source.
+    """
+
+    def __init__(self, executable=None):
+        # Accepted only for compatibility with the former Verible wrapper.
+        # No executable is located or launched.
+        pass
+
+    def parse_string(self, string, options=None):
+        return self._parse_bytes(string.encode("utf-8"), options)
+
+    def _parse_bytes(self, source, options=None):
+        opts = {"gen_tree": True, "gen_tokens": False, "gen_rawtokens": False, **(options or {})}
+        tree, inserted = _parse_source(source)
+        data = SyntaxData(source_code=source, errors=[], inserted_bytes=inserted)
+        stack = [tree.root_node]
+        tokens = []
+        while stack:
+            node = stack.pop()
+            if node.is_error or node.is_missing:
+                start, end = _original_offset(data, node.start_byte), _original_offset(data, node.end_byte)
+                text = source[start:end].decode("utf-8", errors="replace")
+                message = f"missing {node.type}" if node.is_missing else f"unexpected syntax {text[:100]!r}"
+                line = source.count(b"\n", 0, start)
+                column = start - source.rfind(b"\n", 0, start) - 1
+                data.errors.append(ParseError(line, column, "parse", message))
+                # Report the recovery span once; do not duplicate nested errors.
+                if node.is_error and not (opts["gen_tokens"] or opts["gen_rawtokens"]):
+                    continue
+            if node.child_count:
+                if node.has_error or opts["gen_tokens"] or opts["gen_rawtokens"]:
+                    stack.extend(reversed(node.children))
+            elif opts["gen_tokens"] or opts["gen_rawtokens"]:
+                start, end = _original_offset(data, node.start_byte), _original_offset(data, node.end_byte)
+                if end > start:
+                    tokens.append(Token(node.type, start, end, data))
+        if opts["gen_tree"]:
+            data.tree = SyntaxNode(tree.root_node, data)
+        if opts["gen_tokens"]:
+            data.tokens = [t for t in tokens if t.tag not in {"one_line_comment", "block_comment"}]
+        if opts["gen_rawtokens"]:
+            data.rawtokens = tokens
+        return data
+
+    def parse_file(self, path, options=None):
+        return self._parse_bytes(Path(path).read_bytes(), options)
+
+    def parse_files(self, paths, options=None):
+        return {str(path): self.parse_file(path, options) for path in paths}
+
+
+# Import compatibility only: CST tags now follow tree-sitter-systemverilog.
+VeribleParser = TreeSitterParser
+VeribleVerilogSyntax = TreeSitterParser
 
 
 def _iter_children(node: Any) -> Iterable[Any]:
@@ -710,7 +618,7 @@ def find_descendant(node: Any, tag: str) -> Optional[Any]:
 def _node_span(node: Any) -> Optional[tuple[int, int]]:
     if isinstance(node, dict) and "start" in node and "end" in node:
         return (int(node["start"]), int(node["end"]))
-    if isinstance(node, TokenNode):
+    if isinstance(node, (TokenNode, SyntaxNode)):
         return (node.start, node.end)
     return None
 

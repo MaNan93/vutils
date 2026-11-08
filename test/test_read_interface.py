@@ -1,8 +1,6 @@
 """Interface-only reads must match complete CST analysis and validate bodies."""
 
-import copy
-import json
-import subprocess
+from vutils.vparser import _parse_source
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,13 +8,13 @@ from unittest.mock import patch
 
 from vutils import read_interface, read_interface_from_file
 from vutils.vedit import _InterfaceParser, vedit
-from vutils.vparser import PreOrderTreeIterator, SyntaxData, VeribleParser
+from vutils.vparser import PreOrderTreeIterator, SyntaxData, TreeSitterParser
 
 
 def full_interface(source, name):
     editor = vedit(source, name)
     return {"name": editor.module_name, "module_name": editor.module_name,
-            "ports": editor.ports, "param_names": editor.param_names,
+            "ports": editor.ports, "param_names": editor.param_names, "imports": editor.analyze(False)["imports"],
             "is_ansi": editor.is_ansi, "parameter_declaration": editor.parameter_declaration}
 
 
@@ -99,39 +97,27 @@ class ReadInterfaceTests(unittest.TestCase):
 
     def test_one_native_parse_without_instance_extraction(self):
         source = "module top(input a); sub u0(.a(a)); endmodule"
-        with patch("vutils.vparser.subprocess.run", wraps=subprocess.run) as run, \
+        with patch("vutils.vparser._parse_source", wraps=_parse_source) as run, \
              patch("vutils.vedit._extract_instances", side_effect=AssertionError("instance scan")):
             result = read_interface(source)
         self.assertEqual(run.call_count, 1)
         self.assertNotIn("cst", result)
         self.assertNotIn("instances", result)
 
-    def test_only_interface_nodes_built_and_editor_still_gets_complete_tree(self):
-        source = ("module top(input a); " + "wire [7:0] x; " * 30
-                  + "sub u0(.a(a)); endmodule")
-        light = _InterfaceParser().parse_string(source)
-        full = VeribleParser().parse_string(source)
-        light_nodes = list(PreOrderTreeIterator(light.tree))
-        full_nodes = list(PreOrderTreeIterator(full.tree))
-        self.assertLess(len(light_nodes), len(full_nodes) / 10)
-        self.assertFalse(light.tree.find({"tag": "kGateInstance"}))
-        self.assertTrue(full.tree.find({"tag": "kGateInstance"}))
+    def test_interface_read_keeps_body_wrappers_lazy(self):
+        source = "module top(input a); " + "wire [7:0] x; " * 30 + "sub u0(.a(a)); endmodule"
+        parser = _InterfaceParser()
+        data = parser.parse_string(source)
+        self.assertIsNone(data.tree._children)
+        from vutils.vedit import _find_module_nodes, _extract_ports, _is_ansi_module
+        mod = _find_module_nodes(data.tree)[0]
+        self.assertEqual(_extract_ports(mod, source, _is_ansi_module(mod))[0]["name"], "a")
+        body = next(c for c in mod.children if c.tag == "net_declaration")
+        self.assertIsNone(body._children)
         editor = vedit(source, "top")
         self.assertEqual(editor.instances[0]["name"], "u0")
-        editor.add_inst_port({"u0": {"b": {"wire": "b"}}})
-        self.assertIn(".b", editor.module_text)
-
-    def test_pruning_does_not_mutate_json(self):
-        source = "module top(input a); wire x; sub u0(.a(a)); endmodule"
-        parser = VeribleParser()
-        proc = subprocess.run(parser._build_args(parser._options(None), ["-"]),
-                              input=source.encode(), capture_output=True, check=True)
-        raw = json.loads(proc.stdout)["-"]["tree"]
-        original = copy.deepcopy(raw)
-        data = SyntaxData(source_code=source.encode())
-        light = parser._transform_interface_tree(raw, data, True)
-        self.assertEqual(raw, original)
-        self.assertEqual(light.find({"tag": "kModuleHeader"}).text, "module top(input a);")
+        editor.add_inst_ports("u0", {"b": "b"})
+        self.assertIn(".b(b)", editor.module_text)
 
 
 if __name__ == "__main__":
