@@ -244,10 +244,15 @@ def apply_edit_actions(source_text: str, mod_name: str, args: argparse.Namespace
         ed.add_wire({spec["name"]: spec})
     for spec_str in (args.add_inst_port or []):
         spec = parse_add_inst_port_spec(spec_str)
+        if spec["instname"] == "*":
+            targets = [inst["path"] for inst in ed.instances]
+            if not targets:
+                raise ValueError(f"Module '{mod_name}' has no direct instances for '*' broadcast")
+        else:
+            targets = [spec["instname"]]
         ed.add_inst_port({
-            spec["instname"]: {
-                spec["port"]: {"wire": spec["wire"]},
-            },
+            target: {spec["port"]: {"wire": spec["wire"]}}
+            for target in targets
         })
 
     new_source = ed.module_text
@@ -286,13 +291,60 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Parse / edit Verilog module ports with Tree-sitter SystemVerilog",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples (file paths are relative to the current directory):\n"
-            "  uv run vutils --help\n"
-            "  uv run vutils examples/test_parser.sv --module top --list-port all\n"
-            "  uv run vutils design.sv --inst --inst-name u_design\n"
-            "Tree-sitter runs in-process; no external parser executable is required."
-        ),
+        epilog="""Quick start:
+  vutils design.sv --list-port all
+  vutils design.sv --module top --hier
+  vutils design.sv --module top --inst --inst-name u_top
+  vutils design.sv --add-port 'input, logic, [7:0], data' --diff
+  vutils design.sv --add-wire 'logic, [7:0], internal_data' --output edited.sv
+  vutils design.sv --add-inst-port 'u_child, enable, enable' --diff
+
+Broadcast an input to every direct instance of the selected module:
+  vutils design.sv --module top --add-port 'input, logic, a' \\
+    --add-inst-port '*,a,a' --diff
+  Replace --diff with --inplace to save, or --output edited.sv to save a copy.
+  Quote the entire SPEC so the shell does not expand '*' or square brackets.
+
+SPEC formats (comma-separated; edit options may be repeated):
+  --add-port      'direction, [type,] [width,] name[, dimension]'
+                  Examples: 'input,a'; 'input,logic,[7:0],data';
+                            'output,logic,[7:0],samples,[0:3]'
+  --add-wire      '[type,] [width,] name[, dimension]' (default type: wire)
+  --add-inst-port 'selector, port[, expression]'
+                  selector: unique instance name, generate.scope.instance,
+                            or exactly '*' for all direct instances.
+                  Examples: 'u0,a,a'; 'g_lane.u0,a,a'; '*,enable,enable';
+                            "*,enable,1'b0"; 'u0,unused,' (unconnected).
+
+Broadcast scope and conflicts:
+  '*' includes instances in generate scopes and instance arrays in the selected
+  module only. It does not expand generate loops or edit child module files.
+  Child modules must already declare the added pin. Add module ports separately
+  with --add-port; instance edits do not create parent signals automatically.
+  An identical named connection is unchanged; a different existing connection
+  is an error. No matching instances is an error. Partial glob patterns such as
+  'u_*' are not supported. Multiple modules require --module for edits.
+
+Batch files (one module per file; preview each before saving):
+  for file in ./*.sv; do
+    vutils "$file" --add-port 'input,logic,a' --diff || break
+  done
+  Replace --diff with --inplace to save. Each invocation edits one file;
+  a failure stops the loop, but earlier saved files are not rolled back.
+
+Output and checks:
+  Without output flags, edited source is printed; input files are not written.
+  --diff previews changes; --check returns 1 if changes are needed, else 0.
+  --diff --check combines both. These require an edit; --check cannot be used
+  with --inplace/--output. Failed edits do not write output files.
+  Exit codes: 0 success; 1 missing input or --check changes needed;
+              2 parse/argument error; 3 edit error; 4 template generation error.
+
+Parsing scope:
+  Tree-sitter runs in-process; no external parser executable is required.
+  This is source editing, without full preprocessing, include expansion, type
+  checking, or elaboration. Syntax validation does not prove design compilation.
+""",
     )
     parser.add_argument("sv_file", type=Path, help="Path to .v/.sv file")
 
@@ -304,7 +356,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="List ports filtered by direction: all, input, output, inout, ref",
     )
     parser.add_argument("--hier", "--hierarchy", action="store_true", dest="hierarchy",
-                        help="Print module hierarchy")
+                        help="Print source instance hierarchy for modules defined in this file (no elaboration)")
     parser.add_argument("--module", dest="module_name",
                         help="Specify module name if file contains multiple modules")
     parser.add_argument("--inst", action="store_true", dest="inst",
@@ -329,7 +381,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--add-wire", dest="add_wire", action="append", metavar="SPEC",
                         help="Add wire: 'type, width, name, dimension' (repeatable)")
     parser.add_argument("--add-inst-port", dest="add_inst_port", action="append", metavar="SPEC",
-                        help="Add instance port: 'instname or generate.scope.instname, port, wire' (repeatable)")
+                        help="Add connection: 'selector, port[, expression]'; selector is an instance name, generate path, or '*' for all direct instances (repeatable)")
 
     out_group = parser.add_mutually_exclusive_group()
     out_group.add_argument("--inplace", action="store_true", dest="inplace",

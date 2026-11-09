@@ -62,6 +62,112 @@ uv run vutils ../src/Layer3/xtlh_ms.sv --add-port 'input, logic, review_enable' 
 需要修改时返回 1；语法或编辑错误仍返回对应错误码。两者可以组合用于 CI。
 这两个选项都需要编辑参数，不能与 `--inplace` 或 `--output` 一起使用。
 
+## 常用命令与参数
+
+| 选项 | 用途 |
+| --- | --- |
+| `--module NAME` | 选择文件内的模块；编辑多模块文件时必须指定 |
+| `--list-port all/input/output/inout/ref` | 按方向列出端口 |
+| `--hier` | 显示本文件内模块的源码实例关系，不展开实际设计 |
+| `--inst --inst-name u_top` | 生成信号声明、参数传递和实例化模板 |
+| `--inst-no-param` / `--inst-no-decl` | 生成模板时省略参数块或信号声明 |
+| `--add-port SPEC` | 添加模块端口，可重复 |
+| `--add-wire SPEC` | 添加内部信号，可重复 |
+| `--add-inst-port SPEC` | 添加实例引脚连接，可重复；支持 `*` 广播 |
+| `--diff` | 预览差异，不写文件 |
+| `--check` | 检查是否需要修改，不写文件；可与 `--diff` 组合 |
+| `--output FILE` | 写入另一个文件 |
+| `--inplace` | 修改输入文件 |
+
+不指定输出选项时，编辑后的源码打印到终端。`--diff`、`--output`、`--inplace`
+互斥；`--check` 不能与后两者组合。编辑和检查语法失败时不写输出文件。
+
+端口格式为 `direction, [type,] [width,] name[, dimension]`，例如：
+
+```bash
+vutils design.sv --add-port 'input,a' --diff
+vutils design.sv --add-port 'input,logic,[7:0],data' --diff
+vutils design.sv --add-port 'output,logic,[7:0],samples,[0:3]' --diff
+vutils design.sv --add-wire 'logic,[7:0],internal_data' --diff
+```
+
+`type` 省略时模块端口不自动补类型，内部信号默认 `wire`；位宽和数组维度可以省略。
+包含空格、方括号、星号或表达式的 SPEC 应使用引号，避免 shell 展开。
+
+## 向所有直接子实例广播信号
+
+例如给父模块添加一位输入 `a`，并给所有直接子实例连接 `.a(a)`：
+
+```bash
+# 只查看差异
+vutils design.sv --module top \
+  --add-port 'input,logic,a' \
+  --add-inst-port '*,a,a' --diff
+
+# 确认后保存到新文件
+vutils design.sv --module top \
+  --add-port 'input,logic,a' \
+  --add-inst-port '*,a,a' --output design.edited.sv
+```
+
+`--add-inst-port` 的格式是 `selector, port[, expression]`：
+
+```bash
+# 单个实例、generate 作用域内实例
+vutils design.sv --add-inst-port 'u0,a,a' --diff
+vutils design.sv --add-inst-port 'g_lane.u0,a,a' --diff
+
+# 所有直接实例同时添加两组连接
+vutils design.sv --add-inst-port '*,a,a' --add-inst-port '*,b,b' --diff
+
+# 引脚悬空（省略 expression 也表示悬空）
+vutils design.sv --add-inst-port 'u0,unused,' --diff
+```
+
+- `*` 精确表示选中模块的全部直接实例，包括 generate 内的实例及实例数组声明。
+  不递归修改子模块定义，不展开 generate 循环或实例数组。
+- 当前只支持完整的 `*`，不支持 `u_*` 等局部通配模式。
+- 子模块定义必须已有对应引脚；本操作不检查跨文件接口，也不自动声明父模块信号。
+- 已有相同的命名连接会跳过；同一引脚已连接到其他表达式则报错，不覆盖。
+- 没有子实例时广播报错；短实例名有歧义时应使用 `--hier` 显示的完整源码路径。
+- `*` 是 CLI 功能；Python API 可枚举 `editor.instances` 的 `path`，再调用
+  `add_inst_port` 或 `add_ports_and_inst_ports` 批量编辑。
+
+## 批量给多个文件添加模块端口
+
+每个文件只有一个模块时，用 shell 循环即可。先预览：
+
+```bash
+for file in ./*.sv; do
+  vutils "$file" --add-port 'input,logic,a' --diff || break
+done
+```
+
+确认后，把 `--diff` 换成 `--inplace`。文件名通过引号保留空格；出错即停止，
+但已经保存的前面文件不会回滚。当前目录需有匹配的 `.sv` 文件。
+每次调用只操作一个文件中的一个模块，不添加子实例连接。
+多模块文件必须加 `--module NAME`；不同文件的目标名称不同时，应逐文件指定。
+若希望修改某文件里的全部模块，可使用 Python API：
+
+```python
+from pathlib import Path
+from vutils import vedit
+
+path = Path("design.sv")
+source = path.read_bytes().decode("utf-8")
+module_names = vedit.list_modules(source)
+for name in module_names:
+    # 每次基于上一步结果创建 editor，保留同文件中其他模块的改动。
+    editor = vedit(source, name)
+    editor.add_port({"a": {"direction": "input", "type": "logic"}})
+    source = editor.module_text
+print(source)  # 先预览；需要保存时使用 path.write_bytes(source.encode("utf-8"))
+```
+
+退出码：`0` 成功；`1` 输入文件不存在或 `--check` 检测到需要修改；
+`2` 参数/解析错误；`3` 编辑错误；`4` 实例模板生成错误。
+`--check` 返回 `1` 可以是正常的差异结果，批处理时不要将其一律视为解析失败。
+
 ## 使用 code/src 中的文件
 
 在本仓库根目录执行，`../src` 即父工作区的 `code/src`：
@@ -140,3 +246,5 @@ CLI 用它复用首次解析；正常读取路径只解析一次，单次编辑�
 位宽表达式加括号，并用稀疏位置映射恢复原始偏移。原始表达式、输出文件不会被改写。
 嵌套成员用作索引时的语法歧义也通过内部括号和位置映射适配。
 `ERROR` 和缺失 token 都作为失败处理；语法通过不等于完整设计编译通过。
+
+工程兼容性扫描结果及已知问题见 [2026-11-09 测试记录](docs/compatibility-2026-11-09.md)。
